@@ -3,9 +3,11 @@
 import { useState } from "react";
 import type { ScrapeResult, Review, SourceResult } from "./api/scrape/route";
 import type { SentimentSummaries } from "./api/summarize/route";
+import type { ActionsResult, BusinessAction } from "./api/actions/route";
 
 type ScrapeStatus = "idle" | "loading" | "success" | "error";
 type SummarizeStatus = "idle" | "loading" | "success" | "error";
+type ActionsStatus = "idle" | "loading" | "success" | "error";
 type SentimentKey = Review["sentiment"];
 type FilterKey = "all" | SentimentKey;
 
@@ -213,6 +215,10 @@ export default function Home() {
   const [summaries, setSummaries] = useState<SentimentSummaries | null>(null);
   const [summarizeError, setSummarizeError] = useState("");
 
+  const [actionsStatus, setActionsStatus] = useState<ActionsStatus>("idle");
+  const [actionsResult, setActionsResult] = useState<ActionsResult | null>(null);
+  const [actionsError, setActionsError] = useState("");
+
   function updateUrl(i: number, val: string) {
     setUrls((prev) => prev.map((u, idx) => (idx === i ? val : u)));
   }
@@ -230,6 +236,9 @@ export default function Home() {
     setSourceFilter("all");
     setSummaries(null);
     setSummarizeStatus("idle");
+    setActionsResult(null);
+    setActionsStatus("idle");
+    setActionsError("");
     try {
       const res = await fetch("/api/scrape", {
         method: "POST",
@@ -255,13 +264,33 @@ export default function Home() {
         body: JSON.stringify({
           positive: reviews.filter((r) => r.sentiment === "positive").map((r) => r.text),
           negative: reviews.filter((r) => r.sentiment === "negative").map((r) => r.text),
-          neutral: reviews.filter((r) => r.sentiment === "neutral").map((r) => r.text),
         }),
       });
       const data = await res.json();
       if (!res.ok) { setSummarizeError(data.error ?? "Erreur."); setSummarizeStatus("error"); }
       else { setSummaries(data); setSummarizeStatus("success"); }
     } catch { setSummarizeError("Impossible de contacter le serveur."); setSummarizeStatus("error"); }
+  }
+
+  async function handleActions() {
+    if (!result) return;
+    setActionsStatus("loading");
+    setActionsResult(null);
+    setActionsError("");
+    const negativeTexts = result.allReviews
+      .filter((r) => r.sentiment === "negative")
+      .map((r) => r.text);
+    const company = urls.find((u) => u.trim()) ?? "l'entreprise";
+    try {
+      const res = await fetch("/api/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ negative: negativeTexts, company }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setActionsError(data.error ?? "Erreur."); setActionsStatus("error"); }
+      else { setActionsResult(data); setActionsStatus("success"); }
+    } catch { setActionsError("Impossible de contacter le serveur."); setActionsStatus("error"); }
   }
 
   const sourceNames = result ? [...new Set(result.allReviews.map((r) => r.source))] : [];
@@ -309,8 +338,8 @@ export default function Home() {
               Analysez les avis de n&apos;importe quelle entreprise
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              Entrez une <strong>URL de page d&apos;avis</strong> ou directement un <strong>nom d&apos;entreprise</strong>
-              {" "}— nous cherchons automatiquement sur Trustpilot, Pages Jaunes, Yelp et TripAdvisor.
+              Entrez un <strong>nom d&apos;entreprise</strong> — les avis réels sont récupérés automatiquement
+              sur Trustpilot, Pages Jaunes, Yelp, TripAdvisor, Custplace, Avis Vérifiés, Opineo, Indeed et Glassdoor.
             </p>
           </div>
 
@@ -372,7 +401,7 @@ export default function Home() {
                     <circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>
                     <path d="M8 8l2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
                   </svg>
-                  Recherche automatique sur Trustpilot, Pages Jaunes, Yelp, TripAdvisor
+                  Recherche sur Trustpilot, Pages Jaunes, Yelp, TripAdvisor, Custplace, Opineo, Indeed…
                 </span>
               )}
               <button
@@ -408,7 +437,7 @@ export default function Home() {
             <div>
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">Sources analysées</p>
               <div className="flex flex-wrap gap-2">
-                {result.sources.map((s, i) => <SourceChip key={i} source={s} />)}
+                {result.sources.filter((s) => !s.error).map((s, i) => <SourceChip key={i} source={s} />)}
               </div>
             </div>
           )}
@@ -483,7 +512,7 @@ export default function Home() {
 
               {summarizeStatus === "loading" && (
                 <div className="space-y-3">
-                  {(["positive", "negative", "neutral"] as const).map((k) => (
+                  {(["positive", "negative"] as const).map((k) => (
                     <div key={k} className={`rounded-xl border p-4 space-y-2 ${S[k].summary}`}>
                       <div className="flex items-center gap-2">
                         <span className={`w-2 h-2 rounded-full ${S[k].dot}`} />
@@ -498,19 +527,113 @@ export default function Home() {
 
               {summarizeStatus === "success" && summaries && (
                 <div className="space-y-3">
-                  {(["positive", "negative", "neutral"] as const).map((k) => (
-                    <div key={k} className={`rounded-xl border p-4 ${S[k].summary}`}>
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${S[k].dot}`} />
-                        <span className={`text-xs font-bold uppercase tracking-widest ${S[k].summaryTitle}`}>{S[k].plural}</span>
-                        <span className="text-xs text-slate-400 ml-1">· {result.aggregated[k]} avis</span>
+                  {(["positive", "negative"] as const).map((k) => {
+                    const bullets: string[] = summaries[k] ?? [];
+                    return (
+                      <div key={k} className={`rounded-xl border p-4 ${S[k].summary}`}>
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className={`w-2 h-2 rounded-full shrink-0 ${S[k].dot}`} />
+                          <span className={`text-xs font-bold uppercase tracking-widest ${S[k].summaryTitle}`}>{S[k].plural}</span>
+                          <span className="text-xs text-slate-400 ml-1">· {result.aggregated[k]} avis</span>
+                        </div>
+                        {bullets.length === 0 ? (
+                          <p className="text-xs text-slate-400 italic">Aucun point saillant identifié.</p>
+                        ) : (
+                          <ul className="space-y-1.5">
+                            {bullets.map((b, i) => (
+                              <li key={i} className={`flex items-start gap-2 text-sm ${S[k].summaryText}`}>
+                                <span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${S[k].dot} opacity-70`} />
+                                {b}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
-                      <p className={`text-sm leading-relaxed ${S[k].summaryText}`}>{summaries[k]}</p>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
+
+            {/* Business Actions */}
+            {result.aggregated.negative > 0 && (
+              <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-5 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-5 h-5 rounded-md bg-gradient-to-br from-orange-400 to-rose-500 flex items-center justify-center">
+                        <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="currentColor">
+                          <path d="M6 1v6M6 9v2" stroke="white" strokeWidth="1.5" strokeLinecap="round" fill="none"/>
+                        </svg>
+                      </div>
+                      <span className="text-sm font-semibold text-slate-800">Actions business</span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-slate-400 ml-7">
+                      Recommandations pour réduire les avis négatifs ({result.aggregated.negative})
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleActions}
+                    disabled={actionsStatus === "loading"}
+                    className="shrink-0 flex items-center gap-2 h-9 px-4 rounded-xl border border-orange-200 bg-orange-50 text-sm font-medium text-orange-700 hover:bg-orange-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {actionsStatus === "loading" ? (
+                      <><Spinner size={3} /> Analyse…</>
+                    ) : actionsStatus === "success" ? "Régénérer" : "Analyser"}
+                  </button>
+                </div>
+
+                {actionsStatus === "error" && (
+                  <p className="text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3 border border-rose-200">{actionsError}</p>
+                )}
+
+                {actionsStatus === "idle" && (
+                  <p className="text-sm text-slate-400 text-center py-4 border border-dashed border-slate-200 rounded-xl">
+                    Cliquez sur &quot;Analyser&quot; pour obtenir des actions concrètes basées sur les avis négatifs
+                  </p>
+                )}
+
+                {actionsStatus === "loading" && (
+                  <div className="space-y-2.5">
+                    {[1, 2, 3, 4].map((n) => (
+                      <div key={n} className="flex gap-3 p-3 rounded-xl border border-slate-100 bg-slate-50">
+                        <Skeleton className="w-16 h-5 rounded-full shrink-0" />
+                        <div className="flex-1 space-y-1.5">
+                          <Skeleton className="h-3 w-2/5" />
+                          <Skeleton className="h-3 w-4/5" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {actionsStatus === "success" && actionsResult && (
+                  <div className="space-y-2.5">
+                    {actionsResult.actions.map((action: BusinessAction, i: number) => {
+                      const priorityCfg = {
+                        haute:   { label: "Priorité haute",   bg: "bg-rose-50",   text: "text-rose-700",   border: "border-rose-200",   dot: "bg-rose-500" },
+                        moyenne: { label: "Priorité moyenne", bg: "bg-amber-50",  text: "text-amber-700",  border: "border-amber-200",  dot: "bg-amber-500" },
+                        faible:  { label: "Priorité faible",  bg: "bg-slate-50",  text: "text-slate-600",  border: "border-slate-200",  dot: "bg-slate-400" },
+                      }[action.priority];
+                      return (
+                        <div key={i} className={`flex gap-3 p-4 rounded-xl border ${priorityCfg.border} bg-white`}>
+                          <div className="shrink-0 pt-0.5">
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${priorityCfg.bg} ${priorityCfg.text}`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${priorityCfg.dot}`} />
+                              {priorityCfg.label}
+                            </span>
+                          </div>
+                          <div className="flex flex-col gap-0.5 min-w-0">
+                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide truncate">{action.problem}</p>
+                            <p className="text-sm text-slate-800 leading-snug">{action.action}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Filter bar */}
             <div className="flex flex-wrap items-center gap-2">
@@ -600,7 +723,7 @@ export default function Home() {
             <div className="mx-auto w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-100 to-indigo-100 flex items-center justify-center text-2xl">
               🔍
             </div>
-            <p className="text-sm text-slate-400">Entrez une URL ci-dessus pour commencer l&apos;analyse</p>
+            <p className="text-sm text-slate-400">Entrez un nom d&apos;entreprise pour commencer l&apos;analyse</p>
           </div>
         )}
       </main>

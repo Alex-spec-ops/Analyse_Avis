@@ -9,39 +9,58 @@ interface SummarizeBody {
 }
 
 export interface SentimentSummaries {
-  positive: string;
-  negative: string;
-  neutral: string;
+  positive: string[];
+  negative: string[];
 }
 
 async function summarizeGroup(
   texts: string[],
   sentiment: "positifs" | "négatifs" | "neutres"
-): Promise<string> {
-  if (texts.length === 0) {
-    return `Aucun avis ${sentiment} à résumer.`;
-  }
+): Promise<string[]> {
+  if (texts.length === 0) return [];
 
-  const sample = texts.slice(0, 30).join("\n---\n");
+  const sample = texts.slice(0, 40).join("\n---\n");
 
   const completion = await client.chat.completions.create({
     model: "llama-3.3-70b-versatile",
-    max_tokens: 300,
+    max_tokens: 250,
+    temperature: 0.3,
     messages: [
       {
+        role: "system",
+        content:
+          "Tu es un analyste d'avis clients. Tu identifies les points récurrents dans des avis et les résumes en bullets très courts.",
+      },
+      {
         role: "user",
-        content: `Voici ${texts.length} avis ${sentiment} extraits d'un ou plusieurs sites web :\n\n${sample}\n\nRédige un résumé concis (3-5 phrases) qui synthétise les thèmes récurrents, les points saillants et la tonalité générale de ces avis ${sentiment}. Réponds uniquement avec le résumé, sans introduction ni conclusion.`,
+        content: `Voici ${texts.length} avis ${sentiment} sur une entreprise :
+
+${sample}
+
+Identifie les 4 à 5 points qui reviennent le plus souvent dans ces avis ${sentiment}.
+Réponds UNIQUEMENT avec les bullets, un par ligne, format strict :
+• [point en 5-10 mots max]
+• [point en 5-10 mots max]
+...
+Pas d'introduction, pas de conclusion, pas d'explication. Juste les bullets.`,
       },
     ],
   });
 
-  return completion.choices[0]?.message?.content?.trim() ?? "";
+  const raw = completion.choices[0]?.message?.content?.trim() ?? "";
+  return raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("•") || l.startsWith("-") || l.startsWith("*"))
+    .map((l) => l.replace(/^[•\-*]\s*/, "").trim())
+    .filter((l) => l.length > 0)
+    .slice(0, 5);
 }
 
 export async function POST(request: Request) {
   if (!process.env.GROQ_API_KEY) {
     return Response.json(
-      { error: "Clé API Groq manquante. Ajoutez GROQ_API_KEY dans votre fichier .env.local." },
+      { error: "Clé API Groq manquante. Ajoutez GROQ_API_KEY dans .env.local." },
       { status: 500 }
     );
   }
@@ -53,19 +72,17 @@ export async function POST(request: Request) {
     return Response.json({ error: "Corps de requête invalide." }, { status: 400 });
   }
 
-  const { positive = [], negative = [], neutral = [] } = body;
+  const { positive = [], negative = [] } = body;
 
   try {
-    const [positiveSummary, negativeSummary, neutralSummary] = await Promise.all([
+    const [positiveBullets, negativeBullets] = await Promise.all([
       summarizeGroup(positive, "positifs"),
       summarizeGroup(negative, "négatifs"),
-      summarizeGroup(neutral, "neutres"),
     ]);
 
     const summaries: SentimentSummaries = {
-      positive: positiveSummary,
-      negative: negativeSummary,
-      neutral: neutralSummary,
+      positive: positiveBullets,
+      negative: negativeBullets,
     };
 
     return Response.json(summaries);

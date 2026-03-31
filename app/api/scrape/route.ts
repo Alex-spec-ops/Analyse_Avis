@@ -191,11 +191,10 @@ function dedup(items: RawItem[]): RawItem[] {
     if (seen.has(text)) return false;
     seen.add(text);
     return true;
-  }).slice(0, 120);
+  });
 }
 
 // ── Strategy 1 : JSON-LD (schema.org Review) ─────────────────
-// Works on many sites that expose structured data (Trustpilot, Yelp, etc.)
 
 function extractJsonLd($full: CheerioAPI): RawItem[] {
   const results: RawItem[] = [];
@@ -211,17 +210,14 @@ function extractJsonLd($full: CheerioAPI): RawItem[] {
         if (Array.isArray(node)) { node.forEach(walk); return; }
         const o = node as Record<string, unknown>;
 
-        // schema.org Review
         if (o["@type"] === "Review" || o["@type"] === "UserReview") {
           const body = (o.reviewBody || o.description || "") as string;
           const rating = ((o.reviewRating as Record<string, unknown>)?.ratingValue ?? null) as string | null;
           if (isValid(clean(body))) results.push({ text: clean(body), rating: rating?.toString() ?? null });
           return;
         }
-        // Nested reviews array
         const revArr = o.review || o.reviews || [];
         (Array.isArray(revArr) ? revArr : [revArr]).forEach(walk);
-        // Walk all other values
         for (const v of Object.values(o)) {
           if (typeof v === "object") walk(v);
         }
@@ -233,7 +229,7 @@ function extractJsonLd($full: CheerioAPI): RawItem[] {
   return results;
 }
 
-// ── Strategy 2 : __NEXT_DATA__ (Next.js SSR — Trustpilot, etc.) ──
+// ── Strategy 2 : __NEXT_DATA__ (Next.js SSR) ──────────────────
 
 function extractNextData(html: string): RawItem[] {
   const results: RawItem[] = [];
@@ -248,7 +244,6 @@ function extractNextData(html: string): RawItem[] {
       if (Array.isArray(node)) { node.forEach((n) => walk(n, depth + 1)); return; }
       const o = node as Record<string, unknown>;
 
-      // Trustpilot-style: { text: "...", rating: { stars: 5 } }
       const text = (o.text || o.body || o.reviewBody || o.content || o.comment || "") as string;
       if (typeof text === "string" && isValid(text)) {
         const ratingObj = o.rating || o.reviewRating || o.stars;
@@ -267,7 +262,7 @@ function extractNextData(html: string): RawItem[] {
     walk(json);
   } catch { /* ignore */ }
 
-  return results.slice(0, 120);
+  return results;
 }
 
 // ── Strategy 3 : Site-specific CSS parsers ────────────────────
@@ -328,7 +323,6 @@ function parseTripAdvisor($: CheerioAPI): RawItem[] {
     }
     if (results.length >= 2) break;
   }
-  // fallback
   if (results.length === 0) {
     $(".partial_entry, .review-container .entry").each((_, el) => {
       const text = clean($(el).text());
@@ -446,32 +440,221 @@ function parseGooglePlay($: CheerioAPI): RawItem[] {
   return results;
 }
 
-// Avis Vérifiés (avis-verifies.com, société.com) ──────────────
+// Avis Vérifiés (avis-verifies.com) ──────────────────────────
 function parseAvisVerifies($: CheerioAPI): RawItem[] {
   const results: RawItem[] = [];
-  $('[class*="review_comment"], [class*="notation-review"], [class*="avis-text"]').each((_, el) => {
+  const selectors = [
+    '[class*="review_comment"]', '[class*="notation-review"]',
+    '[class*="avis-text"]', ".review-comment", ".avis-content",
+    '[class*="reviewContent"]', '[class*="av-comment"]',
+    ".av-stars-comment", "div[id*='review'] p",
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Custplace ───────────────────────────────────────────────────
+function parseCustplace($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    '[class*="review-text"]', '[class*="reviewText"]',
+    '[class*="comment-content"]', '[class*="avis-texte"]',
+    ".review__content p", ".review-body", ".cp-review-comment",
+    '[data-review-text]', 'div[class*="ReviewContent"]',
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  // Fallback: article paragraphs with sufficient length
+  $("article p, section p").each((_, el) => {
     const text = clean($(el).text());
-    if (isValid(text)) results.push({ text, rating: null });
+    if (text.length >= 40 && text.length <= 2000) results.push({ text, rating: null });
   });
   return results;
 }
 
-// ── Strategy 4 : Generic fallback (improved) ─────────────────
+// Opineo ──────────────────────────────────────────────────────
+function parseOpineon($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    ".review-opinion", '[class*="opinion-text"]', '[class*="review-description"]',
+    ".op-review-text", ".testimonial-text", '[class*="avis-description"]',
+    "div.review p", ".customer-review-content",
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Indeed (avis employés) ──────────────────────────────────────
+function parseIndeed($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    '[data-testid="review-text"]', '[class*="review-body-text"]',
+    ".cmp-review-text", '[class*="ReviewContent"]',
+    'div[class*="review"] p[class*="text"]',
+    ".icl-u-color--secondary",
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Glassdoor ───────────────────────────────────────────────────
+function parseGlassdoor($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    '[class*="review-text"]', '[data-test="review-text"]',
+    '[class*="ReviewText"]', ".gdReview .mt", ".empReview p",
+    'span[data-test="pros"]', 'span[data-test="cons"]',
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Fnac ────────────────────────────────────────────────────────
+function parseFnac($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    ".userReview-text", ".review-description", '[class*="review-content"]',
+    ".product-review-text", '[class*="UserReview"] p',
+    ".fnac-review-comment", ".review__description",
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Cdiscount ───────────────────────────────────────────────────
+function parseCdiscount($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    ".reviewComment", '[class*="review-comment"]',
+    ".avCommentaire", ".cdv-review-text",
+    '[data-test="review-text"]', ".userReviewText",
+    ".note-comment p", '[class*="ReviewText"]',
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Darty ───────────────────────────────────────────────────────
+function parseDarty($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    ".product-review-content", ".review-text",
+    '[class*="ReviewContent"]', ".avis-texte",
+    ".review-description", "div.review p",
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Ekomi ───────────────────────────────────────────────────────
+function parseEkomi($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    ".review__comment", '[class*="ekomi-review"]',
+    ".feedback-text", ".review-comment-text",
+    '[class*="FeedbackText"]', ".ekomi-comment",
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// Société.com ─────────────────────────────────────────────────
+function parseSociete($: CheerioAPI): RawItem[] {
+  const results: RawItem[] = [];
+  const selectors = [
+    ".avis-comment", '[class*="avis-text"]',
+    ".societe-review-text", ".notation-comment",
+    '[class*="review-comment"]', ".avis-content p",
+  ];
+  for (const sel of selectors) {
+    $(sel).each((_, el) => {
+      const text = clean($(el).text());
+      if (isValid(text)) results.push({ text, rating: null });
+    });
+    if (results.length >= 2) return results;
+  }
+  return results;
+}
+
+// ── Strategy 4 : Generic fallback ────────────────────────────
 
 function parseGeneric($: CheerioAPI): RawItem[] {
+  // Only structured review selectors — no generic <p> fallback that would pick up non-review content
   const SELECTORS = [
-    "[itemprop='reviewBody']", "[itemprop='description']",
-    "[data-hook='review-body'] span", "[data-hook='review-body']",
+    "[itemprop='reviewBody']",
+    "[itemprop='reviewBody'] p",
+    "[data-hook='review-body'] span",
+    "[data-hook='review-body']",
     "[data-service-review-text-typography='true'] p",
     ".styles_reviewContent__0Q2Tg p",
-    ".c-review__body", ".c-review-block__review-body",
-    ".review-text", ".review__body", ".review-content",
-    ".review_comment", ".reviewText", ".comment-text",
-    ".comment-body", ".user-comment",
-    '[class*="ReviewBody"]', '[class*="review-body"]', '[class*="review_body"]',
-    "article p", ".card p",
-    '[class*="review"] p', '[class*="avis"] p',
-    '[class*="comment"] p', '[class*="testimonial"] p',
+    ".c-review__body",
+    ".c-review-block__review-body",
+    "[class*='ReviewBody'] p",
+    "[class*='review-body'] p",
+    "[class*='review_body'] p",
+    "[class*='review-text']",
+    "[class*='reviewText']",
+    "[class*='review__body']",
+    "[class*='review-content']",
+    "[class*='review_comment']",
+    "[class*='avis-text']",
+    "[class*='avis-content']",
+    "[class*='testimonial-text']",
+    "[class*='comment-text']",
+    "[class*='comment-body']",
   ];
 
   for (const sel of SELECTORS) {
@@ -483,13 +666,7 @@ function parseGeneric($: CheerioAPI): RawItem[] {
     if (found.length >= 2) return found;
   }
 
-  // Last resort: any substantial paragraph
-  const fallback: RawItem[] = [];
-  $("p").each((_, el) => {
-    const text = clean($(el).text());
-    if (text.length >= 60 && text.length <= 2000) fallback.push({ text, rating: null });
-  });
-  return fallback;
+  return [];
 }
 
 // ── Site detector ─────────────────────────────────────────────
@@ -497,7 +674,9 @@ function parseGeneric($: CheerioAPI): RawItem[] {
 type SiteKey =
   | "trustpilot" | "tripadvisor" | "amazon" | "booking"
   | "yelp" | "pagesjaunes" | "appstore" | "googleplay"
-  | "avisverifies" | "software" | "generic";
+  | "avisverifies" | "custplace" | "opineo" | "indeed"
+  | "glassdoor" | "fnac" | "cdiscount" | "darty"
+  | "ekomi" | "societe" | "software" | "generic";
 
 function detectSite(url: string): SiteKey {
   const h = url.toLowerCase();
@@ -509,18 +688,25 @@ function detectSite(url: string): SiteKey {
   if (h.includes("pagesjaunes.fr")) return "pagesjaunes";
   if (h.includes("apps.apple.com")) return "appstore";
   if (h.includes("play.google.com")) return "googleplay";
-  if (h.includes("avis-verifies.") || h.includes("société.com") || h.includes("xn--socit-esab.com")) return "avisverifies";
+  if (h.includes("avis-verifies.") || h.includes("verified-reviews.")) return "avisverifies";
+  if (h.includes("custplace.com")) return "custplace";
+  if (h.includes("opineo.fr")) return "opineo";
+  if (h.includes("indeed.fr") || h.includes("indeed.com")) return "indeed";
+  if (h.includes("glassdoor.fr") || h.includes("glassdoor.com")) return "glassdoor";
+  if (h.includes("fnac.com")) return "fnac";
+  if (h.includes("cdiscount.com")) return "cdiscount";
+  if (h.includes("darty.com")) return "darty";
+  if (h.includes("ekomi.fr") || h.includes("ekomi.co")) return "ekomi";
+  if (h.includes("societe.com") || h.includes("xn--socit-esab.com")) return "societe";
   if (h.includes("g2.com") || h.includes("capterra.") || h.includes("getapp.")) return "software";
   return "generic";
 }
 
-// ── Company discovery ────────────────────────────────────────
-// Détecte si l'entrée est une URL ou un nom d'entreprise
+// ── Company discovery ─────────────────────────────────────────
 
 function isLikelyUrl(s: string): boolean {
   const t = s.trim();
   if (/^https?:\/\//i.test(t)) return true;
-  // Looks like a domain (no spaces, has TLD)
   if (!t.includes(" ") && /\.[a-z]{2,}(\/|$)/i.test(t)) return true;
   return false;
 }
@@ -530,13 +716,10 @@ function normalizeUrl(s: string): string {
   return /^https?:\/\//i.test(t) ? t : `https://${t}`;
 }
 
-// Trustpilot FR — cherche la première entreprise correspondante
 async function findTrustpilot(company: string): Promise<string | null> {
   try {
     const url = `https://fr.trustpilot.com/search?query=${encodeURIComponent(company)}`;
     const html = await fetchHtml(url);
-
-    // Méthode 1 : __NEXT_DATA__ (Trustpilot est Next.js)
     const ndm = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     if (ndm) {
       const data = JSON.parse(ndm[1]);
@@ -544,17 +727,14 @@ async function findTrustpilot(company: string): Promise<string | null> {
         if (!o || typeof o !== "object") return null;
         if (Array.isArray(o)) { for (const i of o) { const r = findBU(i); if (r) return r; } return null; }
         const obj = o as Record<string, unknown>;
-        if (typeof obj.identifyingName === "string" && obj.identifyingName) {
+        if (typeof obj.identifyingName === "string" && obj.identifyingName)
           return `https://fr.trustpilot.com/review/${obj.identifyingName}`;
-        }
         for (const v of Object.values(obj)) { const r = findBU(v); if (r) return r; }
         return null;
       }
       const found = findBU(data);
       if (found) return found;
     }
-
-    // Méthode 2 : CSS fallback
     const $ = cheerio.load(html);
     const href = $('a[href*="/review/"]').first().attr("href");
     if (href) return `https://fr.trustpilot.com${href.startsWith("/") ? href : "/" + href}`;
@@ -562,7 +742,6 @@ async function findTrustpilot(company: string): Promise<string | null> {
   return null;
 }
 
-// Pages Jaunes — cherche la fiche d'une entreprise en France
 async function findPagesJaunes(company: string): Promise<string | null> {
   try {
     const url = `https://www.pagesjaunes.fr/annuaire/chercherlp?quoiqui=${encodeURIComponent(company)}&ou=France`;
@@ -571,7 +750,6 @@ async function findPagesJaunes(company: string): Promise<string | null> {
     const selectors = [
       "a.bi-denomination", ".bi-bloc-nom a",
       'a[href*="/pros/"]', "[class*='denomination'] a",
-      ".pj-link", ".lien-fiche",
     ];
     for (const sel of selectors) {
       const href = $(sel).first().attr("href");
@@ -581,7 +759,6 @@ async function findPagesJaunes(company: string): Promise<string | null> {
   return null;
 }
 
-// Yelp France
 async function findYelp(company: string): Promise<string | null> {
   try {
     const url = `https://www.yelp.fr/search?find_desc=${encodeURIComponent(company)}&find_loc=France`;
@@ -593,25 +770,90 @@ async function findYelp(company: string): Promise<string | null> {
   return null;
 }
 
-// TripAdvisor France
 async function findTripAdvisor(company: string): Promise<string | null> {
   try {
     const url = `https://www.tripadvisor.fr/Search?q=${encodeURIComponent(company)}`;
     const html = await fetchHtml(url);
     const $ = cheerio.load(html);
-    const href = $('[class*="result-title"] a, a[href*="/Restaurant_Review-"], a[href*="/Hotel_Review-"], a[href*="/Attraction_Review-"]').first().attr("href");
+    const href = $(
+      '[class*="result-title"] a, a[href*="/Restaurant_Review-"], a[href*="/Hotel_Review-"], a[href*="/Attraction_Review-"]'
+    ).first().attr("href");
     if (href) return href.startsWith("http") ? href : `https://www.tripadvisor.fr${href}`;
   } catch { /* ignore */ }
   return null;
 }
 
-// Découverte multi-plateformes (en parallèle)
+async function findCustplace(company: string): Promise<string | null> {
+  try {
+    const url = `https://www.custplace.com/search?q=${encodeURIComponent(company)}`;
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+    const href = $('a[href*="/avis/"], a[href*="/marque/"], [class*="brand-link"]').first().attr("href");
+    if (href) return href.startsWith("http") ? href : `https://www.custplace.com${href}`;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function findAvisVerifies(company: string): Promise<string | null> {
+  try {
+    const url = `https://www.avis-verifies.com/recherche-marque?search=${encodeURIComponent(company)}`;
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+    const href = $(
+      'a[href*="/avis-clients/"], [class*="brand-result"] a, [class*="company-link"] a'
+    ).first().attr("href");
+    if (href) return href.startsWith("http") ? href : `https://www.avis-verifies.com${href}`;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function findOpineon(company: string): Promise<string | null> {
+  try {
+    const url = `https://www.opineo.fr/recherche?q=${encodeURIComponent(company)}`;
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+    const href = $('a[href*="/avis/"], [class*="shop-link"]').first().attr("href");
+    if (href) return href.startsWith("http") ? href : `https://www.opineo.fr${href}`;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function findIndeed(company: string): Promise<string | null> {
+  try {
+    const url = `https://fr.indeed.com/cmp/${encodeURIComponent(company.replace(/\s+/g, "-").toLowerCase())}/reviews`;
+    const html = await fetchHtml(url);
+    if (html.length > 5000 && !html.includes("Page introuvable")) return url;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function findGlassdoor(company: string): Promise<string | null> {
+  try {
+    const url = `https://www.glassdoor.fr/Avis/${encodeURIComponent(company.replace(/\s+/g, "-").toLowerCase())}-avis-SRCH_KE0,${company.length}.htm`;
+    const html = await fetchHtml(url);
+    if (html.length > 5000 && !html.includes("Page introuvable")) return url;
+    // Fallback: search page
+    const searchUrl = `https://www.glassdoor.fr/Reviews/company-reviews.htm?typedKeyword=${encodeURIComponent(company)}&sc.keyword=${encodeURIComponent(company)}`;
+    const searchHtml = await fetchHtml(searchUrl);
+    const $ = cheerio.load(searchHtml);
+    const href = $('a[href*="-Avis-"], a[href*="-Reviews-"]').first().attr("href");
+    if (href) return href.startsWith("http") ? href : `https://www.glassdoor.fr${href}`;
+  } catch { /* ignore */ }
+  return null;
+}
+
+// Découverte multi-plateformes (toutes en parallèle)
 async function discoverReviewUrls(company: string): Promise<{ url: string; platform: string }[]> {
   const settled = await Promise.allSettled([
     findTrustpilot(company).then(u => u ? { url: u, platform: "Trustpilot" } : null),
     findPagesJaunes(company).then(u => u ? { url: u, platform: "Pages Jaunes" } : null),
     findYelp(company).then(u => u ? { url: u, platform: "Yelp" } : null),
     findTripAdvisor(company).then(u => u ? { url: u, platform: "TripAdvisor" } : null),
+    findCustplace(company).then(u => u ? { url: u, platform: "Custplace" } : null),
+    findAvisVerifies(company).then(u => u ? { url: u, platform: "Avis Vérifiés" } : null),
+    findOpineon(company).then(u => u ? { url: u, platform: "Opineo" } : null),
+    findIndeed(company).then(u => u ? { url: u, platform: "Indeed" } : null),
+    findGlassdoor(company).then(u => u ? { url: u, platform: "Glassdoor" } : null),
   ]);
   return settled
     .filter(r => r.status === "fulfilled" && r.value !== null)
@@ -620,13 +862,37 @@ async function discoverReviewUrls(company: string): Promise<{ url: string; platf
 
 // ── Pagination ────────────────────────────────────────────────
 
-const MAX_PAGES  = 25;   // cap par site (évite les abus)
-const BATCH_SIZE = 4;    // pages scrapées en parallèle par lot
-const PAGE_DELAY = 700;  // ms entre chaque lot (anti-ban)
+// Pages max par plateforme — certains sites ont des milliers de pages
+const MAX_PAGES_BY_SITE: Partial<Record<SiteKey, number>> = {
+  trustpilot:   50,
+  tripadvisor:  40,
+  amazon:       30,
+  booking:      30,
+  yelp:         25,
+  pagesjaunes:  20,
+  avisverifies: 40,
+  custplace:    40,
+  opineo:       30,
+  indeed:       25,
+  glassdoor:    25,
+  fnac:         20,
+  cdiscount:    20,
+  darty:        15,
+  ekomi:        30,
+  societe:      15,
+  software:     15,
+  generic:      10,
+};
+
+const BATCH_SIZE = 5;
+const PAGE_DELAY = 600;
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-/** Extrait les RawItems depuis un HTML déjà téléchargé. */
+function getMaxPages(site: SiteKey): number {
+  return MAX_PAGES_BY_SITE[site] ?? 10;
+}
+
 function extractItemsFromHtml(html: string, site: SiteKey): RawItem[] {
   const $full  = cheerio.load(html);
   const $clean = cheerio.load(html);
@@ -645,18 +911,27 @@ function extractItemsFromHtml(html: string, site: SiteKey): RawItem[] {
       case "appstore":     items = parseAppStore($clean); break;
       case "googleplay":   items = parseGooglePlay($clean); break;
       case "avisverifies": items = parseAvisVerifies($clean); break;
+      case "custplace":    items = parseCustplace($clean); break;
+      case "opineo":       items = parseOpineon($clean); break;
+      case "indeed":       items = parseIndeed($clean); break;
+      case "glassdoor":    items = parseGlassdoor($clean); break;
+      case "fnac":         items = parseFnac($clean); break;
+      case "cdiscount":    items = parseCdiscount($clean); break;
+      case "darty":        items = parseDarty($clean); break;
+      case "ekomi":        items = parseEkomi($clean); break;
+      case "societe":      items = parseSociete($clean); break;
       case "software":     items = parseSoftwareReview($clean); break;
       default:             items = parseGeneric($clean); break;
     }
   }
+  // Only fall back to generic if we found nothing — no generic <p> catch-all
   if (items.length < 2) items = parseGeneric($clean);
   return items;
 }
 
-/** Extrait le nombre total de pages depuis la page 1. */
 function detectTotalPages(html: string, baseUrl: string, site: SiteKey): number {
+  const maxPages = getMaxPages(site);
   try {
-    // ── Trustpilot : __NEXT_DATA__ ──────────────────────────
     if (site === "trustpilot") {
       const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
       if (m) {
@@ -672,11 +947,10 @@ function detectTotalPages(html: string, baseUrl: string, site: SiteKey): number 
           return null;
         }
         const total = findPageCount(data);
-        if (total) return Math.min(total, MAX_PAGES);
+        if (total) return Math.min(total, maxPages);
       }
     }
 
-    // ── Amazon : boutons de pagination ─────────────────────
     if (site === "amazon") {
       const $ = cheerio.load(html);
       let max = 1;
@@ -687,18 +961,16 @@ function detectTotalPages(html: string, baseUrl: string, site: SiteKey): number 
         const hm = ($(el).attr("href") || "").match(/pageNumber=(\d+)/);
         if (hm && parseInt(hm[1]) > max) max = parseInt(hm[1]);
       });
-      return Math.min(max, MAX_PAGES);
+      return Math.min(max, maxPages);
     }
 
-    // ── Yelp : totaux d'avis ────────────────────────────────
     if (site === "yelp") {
       const $ = cheerio.load(html);
-      const txt = $('[class*="reviewCount"], [class*="review-count"], .lemon--span__373c0').first().text();
+      const txt = $('[class*="reviewCount"], [class*="review-count"]').first().text();
       const n = parseInt(txt.replace(/\D/g, ""));
-      if (n > 0) return Math.min(Math.ceil(n / 20), MAX_PAGES);
+      if (n > 0) return Math.min(Math.ceil(n / 20), maxPages);
     }
 
-    // ── TripAdvisor : liens -orXX- ──────────────────────────
     if (site === "tripadvisor") {
       const $ = cheerio.load(html);
       let maxOffset = 0;
@@ -706,88 +978,131 @@ function detectTotalPages(html: string, baseUrl: string, site: SiteKey): number 
         const m = ($(el).attr("href") || "").match(/-or(\d+)-/);
         if (m && parseInt(m[1]) > maxOffset) maxOffset = parseInt(m[1]);
       });
-      // Essaie aussi le total d'avis
       const totalTxt = $('[class*="reviewCount"]').first().text();
       const total = parseInt(totalTxt.replace(/\D/g,""));
-      if (total > 0) maxOffset = Math.max(maxOffset, (Math.min(Math.ceil(total/10), MAX_PAGES)-1)*10);
-      if (maxOffset > 0) return Math.min(Math.ceil(maxOffset / 10) + 1, MAX_PAGES);
+      if (total > 0) maxOffset = Math.max(maxOffset, (Math.min(Math.ceil(total / 10), maxPages) - 1) * 10);
+      if (maxOffset > 0) return Math.min(Math.ceil(maxOffset / 10) + 1, maxPages);
     }
 
-    // ── Générique : cherche ?page=N ou ?p=N dans les liens ─
+    if (site === "avisverifies" || site === "custplace" || site === "opineo" ||
+        site === "indeed" || site === "glassdoor" || site === "ekomi") {
+      const $ = cheerio.load(html);
+      // Try to find total review count to estimate pages
+      const countSelectors = [
+        '[class*="review-count"]', '[class*="reviewCount"]',
+        '[class*="total-reviews"]', '[class*="avis-count"]',
+        'span[class*="count"]',
+      ];
+      for (const sel of countSelectors) {
+        const txt = $(sel).first().text().replace(/\D/g, "");
+        const n = parseInt(txt);
+        if (n > 0) {
+          const perPage = site === "glassdoor" ? 10 : site === "indeed" ? 20 : 15;
+          return Math.min(Math.ceil(n / perPage), maxPages);
+        }
+      }
+      // Check for explicit pagination links
+      let pageMax = 1;
+      $("a[href]").each((_, el) => {
+        const href = $(el).attr("href") || "";
+        const m = href.match(/[?&](page|p|pg)=(\d+)/i) ||
+                  href.match(/\/page\/(\d+)/i) ||
+                  href.match(/\/p(\d+)\//i);
+        if (m) {
+          const n = parseInt(m[m.length - 1]);
+          if (!isNaN(n) && n > pageMax) pageMax = n;
+        }
+      });
+      return Math.min(pageMax, maxPages);
+    }
+
+    // Generic: look for ?page= or /page/ patterns
     const $ = cheerio.load(html);
     let pageMax = 1;
     $("a[href]").each((_, el) => {
       const href = $(el).attr("href") || "";
-      const m = href.match(/[?&](?:page|p|pg)=(\d+)/i);
+      const m = href.match(/[?&](?:page|p|pg)=(\d+)/i) || href.match(/\/page\/(\d+)/i);
       if (m) {
         const n = parseInt(m[1]);
         if (n > pageMax) pageMax = n;
       }
     });
-    return Math.min(pageMax, MAX_PAGES);
+    return Math.min(pageMax, maxPages);
 
   } catch { return 1; }
 }
 
-/** Construit l'URL de la page N selon le site. */
 function buildPageUrl(baseUrl: string, page: number, site: SiteKey, firstHtml: string): string | null {
-  const urlObj = new URL(baseUrl);
+  try {
+    const urlObj = new URL(baseUrl);
 
-  if (site === "trustpilot") {
-    urlObj.searchParams.set("page", String(page));
+    if (site === "trustpilot") {
+      urlObj.searchParams.set("page", String(page));
+      return urlObj.toString();
+    }
+    if (site === "amazon") {
+      urlObj.searchParams.set("pageNumber", String(page));
+      return urlObj.toString();
+    }
+    if (site === "yelp") {
+      urlObj.searchParams.set("start", String((page - 1) * 20));
+      return urlObj.toString();
+    }
+    if (site === "booking" || site === "pagesjaunes" || site === "custplace" ||
+        site === "avisverifies" || site === "ekomi" || site === "societe") {
+      urlObj.searchParams.set("page", String(page));
+      return urlObj.toString();
+    }
+    if (site === "tripadvisor") {
+      const offset = (page - 1) * 10;
+      const base = baseUrl.split("?")[0];
+      const alreadyOr = base.match(/-or\d+-/);
+      if (alreadyOr) return base.replace(/-or\d+-/, `-or${offset}-`);
+      return base.replace(/(-Reviews)(-)/i, `$1-or${offset}$2`);
+    }
+    if (site === "indeed") {
+      urlObj.searchParams.set("start", String((page - 1) * 20));
+      return urlObj.toString();
+    }
+    if (site === "glassdoor") {
+      // Glassdoor uses page number in URL path: _P2.htm
+      const base = baseUrl.split("?")[0];
+      const pagePattern = base.match(/_P(\d+)\.htm/i);
+      if (pagePattern) return base.replace(/_P\d+\.htm/i, `_P${page}.htm`);
+      return base.replace(/\.htm$/i, `_P${page}.htm`);
+    }
+    if (site === "opineo") {
+      urlObj.searchParams.set("page", String(page));
+      return urlObj.toString();
+    }
+    if (site === "fnac" || site === "cdiscount" || site === "darty") {
+      urlObj.searchParams.set("page", String(page));
+      return urlObj.toString();
+    }
+
+    // Generic: detect param from first page
+    const existingParam = baseUrl.match(/[?&](page|p|pg)=(\d+)/i)?.[1];
+    if (existingParam) {
+      urlObj.searchParams.set(existingParam, String(page));
+      return urlObj.toString();
+    }
+    // Detect from /page/N/ pattern
+    if (baseUrl.match(/\/page\/\d+/i)) {
+      return baseUrl.replace(/\/page\/\d+/i, `/page/${page}`);
+    }
+    // Try to guess from first page links
+    const $ = cheerio.load(firstHtml);
+    let guessedParam = "page";
+    $("a[href]").each((_, el) => {
+      const m = ($(el).attr("href") || "").match(/[?&](page|p|pg|offset)=(\d+)/i);
+      if (m) { guessedParam = m[1]; return false; }
+    });
+    urlObj.searchParams.set(guessedParam, String(page));
     return urlObj.toString();
-  }
-
-  if (site === "amazon") {
-    urlObj.searchParams.set("pageNumber", String(page));
-    return urlObj.toString();
-  }
-
-  if (site === "yelp") {
-    const start = (page - 1) * 20;
-    urlObj.searchParams.set("start", String(start));
-    return urlObj.toString();
-  }
-
-  if (site === "booking") {
-    urlObj.searchParams.set("page", String(page));
-    return urlObj.toString();
-  }
-
-  if (site === "tripadvisor") {
-    const offset = (page - 1) * 10;
-    // Pattern : -Reviews-or10-Name.html
-    const base = baseUrl.split("?")[0];
-    const alreadyOr = base.match(/-or\d+-/);
-    if (alreadyOr) return base.replace(/-or\d+-/, `-or${offset}-`);
-    return base.replace(/(-Reviews)(-)/i, `$1-or${offset}$2`);
-  }
-
-  if (site === "pagesjaunes") {
-    urlObj.searchParams.set("page", String(page));
-    return urlObj.toString();
-  }
-
-  // Générique : on cherche si le site utilise ?page= ou ?p=
-  const base = baseUrl.split("?")[0];
-  const existingParam = baseUrl.match(/[?&](page|p|pg)=(\d+)/i)?.[1];
-  if (existingParam) {
-    urlObj.searchParams.set(existingParam, String(page));
-    return urlObj.toString();
-  }
-
-  // Tente de deviner le paramètre depuis les liens de la page 1
-  const $ = cheerio.load(firstHtml);
-  let guessedParam = "page";
-  $("a[href]").each((_, el) => {
-    const m = ($(el).attr("href") || "").match(/[?&](page|p|pg|offset)=(\d+)/i);
-    if (m) { guessedParam = m[1]; return false; }
-  });
-  urlObj.searchParams.set(guessedParam, String(page));
-  return urlObj.toString();
+  } catch { return null; }
 }
 
-// ── Main scraper (avec pagination) ────────────────────────────
+// ── Main scraper (avec pagination complète) ───────────────────
 
 async function scrapeOne(url: string): Promise<SourceResult> {
   const source = hostLabel(url);
@@ -796,7 +1111,6 @@ async function scrapeOne(url: string): Promise<SourceResult> {
     url, reviews: [], error, counts: { total: 0, positive: 0, negative: 0, neutral: 0, averageScore: 0 },
   });
 
-  // ── Page 1 ────────────────────────────────────────────────
   let firstHtml: string;
   try {
     firstHtml = await fetchHtml(url);
@@ -808,11 +1122,8 @@ async function scrapeOne(url: string): Promise<SourceResult> {
   }
 
   const allItems: RawItem[] = extractItemsFromHtml(firstHtml, site);
-
-  // ── Détection du nombre de pages ─────────────────────────
   const totalPages = detectTotalPages(firstHtml, url, site);
 
-  // ── Pages suivantes (batches parallèles) ─────────────────
   if (totalPages > 1) {
     const pageUrls: string[] = [];
     for (let p = 2; p <= totalPages; p++) {
@@ -841,8 +1152,7 @@ async function scrapeOne(url: string): Promise<SourceResult> {
 
   if (items.length === 0) {
     return emptyResult(
-      "Aucun avis trouvé — ce site utilise probablement du JavaScript dynamique (SPA). " +
-      "Essayez d'accéder directement à la page des avis."
+      "Aucun avis trouvé — ce site utilise probablement du JavaScript dynamique."
     );
   }
 
@@ -872,7 +1182,6 @@ async function scrapeOne(url: string): Promise<SourceResult> {
   };
 }
 
-
 // ── POST handler ──────────────────────────────────────────────
 
 export async function POST(request: Request) {
@@ -893,13 +1202,11 @@ export async function POST(request: Request) {
     return Response.json({ error: "Maximum 10 entrées à la fois." }, { status: 400 });
   }
 
-  // Résolution : URL directe ou recherche par nom d'entreprise
   const resolvedUrls: string[] = [];
   const notFound: string[] = [];
 
   for (const input of inputs) {
     if (isLikelyUrl(input)) {
-      // Validation protocole
       try {
         const normalized = normalizeUrl(input);
         const parsed = new URL(normalized);
@@ -911,7 +1218,6 @@ export async function POST(request: Request) {
         return Response.json({ error: `URL invalide : ${input}` }, { status: 400 });
       }
     } else {
-      // Recherche automatique sur les plateformes d'avis
       const discovered = await discoverReviewUrls(input);
       if (discovered.length > 0) {
         resolvedUrls.push(...discovered.map(d => d.url));
