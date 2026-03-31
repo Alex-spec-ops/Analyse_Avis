@@ -173,6 +173,13 @@ function Skeleton({ className }: { className?: string }) {
 function ResultsSkeleton() {
   return (
     <div className="space-y-6">
+      <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-4 flex items-center gap-3">
+        <Spinner size={4} />
+        <div>
+          <p className="text-sm font-medium text-slate-700">Récupération de tous les avis en cours…</p>
+          <p className="text-xs text-slate-400 mt-0.5">Détection du nombre de pages · Scraping multi-pages en parallèle</p>
+        </div>
+      </div>
       <div className="flex gap-2">
         <Skeleton className="h-7 w-28 rounded-full" />
         <Skeleton className="h-7 w-32 rounded-full" />

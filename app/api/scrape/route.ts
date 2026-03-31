@@ -618,18 +618,188 @@ async function discoverReviewUrls(company: string): Promise<{ url: string; platf
     .map(r => (r as PromiseFulfilledResult<{ url: string; platform: string }>).value);
 }
 
-// ── Main scraper ──────────────────────────────────────────────
+// ── Pagination ────────────────────────────────────────────────
+
+const MAX_PAGES  = 25;   // cap par site (évite les abus)
+const BATCH_SIZE = 4;    // pages scrapées en parallèle par lot
+const PAGE_DELAY = 700;  // ms entre chaque lot (anti-ban)
+
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+/** Extrait les RawItems depuis un HTML déjà téléchargé. */
+function extractItemsFromHtml(html: string, site: SiteKey): RawItem[] {
+  const $full  = cheerio.load(html);
+  const $clean = cheerio.load(html);
+  $clean("script, style, noscript, nav, footer, header, [aria-hidden='true'], .cookie-banner, #cookie-banner").remove();
+
+  let items: RawItem[] = extractJsonLd($full);
+  if (items.length < 2) items = extractNextData(html);
+  if (items.length < 2) {
+    switch (site) {
+      case "trustpilot":   items = parseTrustpilot($clean); break;
+      case "tripadvisor":  items = parseTripAdvisor($clean); break;
+      case "amazon":       items = parseAmazon($clean); break;
+      case "booking":      items = parseBooking($clean); break;
+      case "yelp":         items = parseYelp($clean); break;
+      case "pagesjaunes":  items = parsePagesJaunes($clean); break;
+      case "appstore":     items = parseAppStore($clean); break;
+      case "googleplay":   items = parseGooglePlay($clean); break;
+      case "avisverifies": items = parseAvisVerifies($clean); break;
+      case "software":     items = parseSoftwareReview($clean); break;
+      default:             items = parseGeneric($clean); break;
+    }
+  }
+  if (items.length < 2) items = parseGeneric($clean);
+  return items;
+}
+
+/** Extrait le nombre total de pages depuis la page 1. */
+function detectTotalPages(html: string, baseUrl: string, site: SiteKey): number {
+  try {
+    // ── Trustpilot : __NEXT_DATA__ ──────────────────────────
+    if (site === "trustpilot") {
+      const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (m) {
+        const data = JSON.parse(m[1]);
+        function findPageCount(o: unknown): number | null {
+          if (!o || typeof o !== "object") return null;
+          if (Array.isArray(o)) { for (const i of o) { const r = findPageCount(i); if (r) return r; } return null; }
+          const obj = o as Record<string, unknown>;
+          for (const k of ["pageCount", "totalPages", "pages", "lastPage"]) {
+            if (typeof obj[k] === "number" && (obj[k] as number) > 0) return obj[k] as number;
+          }
+          for (const v of Object.values(obj)) { const r = findPageCount(v); if (r) return r; }
+          return null;
+        }
+        const total = findPageCount(data);
+        if (total) return Math.min(total, MAX_PAGES);
+      }
+    }
+
+    // ── Amazon : boutons de pagination ─────────────────────
+    if (site === "amazon") {
+      const $ = cheerio.load(html);
+      let max = 1;
+      $("[data-page], .page-button, [aria-label*='Page'], a[href*='pageNumber=']").each((_, el) => {
+        const txt = $(el).text().trim();
+        const n = parseInt(txt);
+        if (!isNaN(n) && n > max) max = n;
+        const hm = ($(el).attr("href") || "").match(/pageNumber=(\d+)/);
+        if (hm && parseInt(hm[1]) > max) max = parseInt(hm[1]);
+      });
+      return Math.min(max, MAX_PAGES);
+    }
+
+    // ── Yelp : totaux d'avis ────────────────────────────────
+    if (site === "yelp") {
+      const $ = cheerio.load(html);
+      const txt = $('[class*="reviewCount"], [class*="review-count"], .lemon--span__373c0').first().text();
+      const n = parseInt(txt.replace(/\D/g, ""));
+      if (n > 0) return Math.min(Math.ceil(n / 20), MAX_PAGES);
+    }
+
+    // ── TripAdvisor : liens -orXX- ──────────────────────────
+    if (site === "tripadvisor") {
+      const $ = cheerio.load(html);
+      let maxOffset = 0;
+      $("a[href]").each((_, el) => {
+        const m = ($(el).attr("href") || "").match(/-or(\d+)-/);
+        if (m && parseInt(m[1]) > maxOffset) maxOffset = parseInt(m[1]);
+      });
+      // Essaie aussi le total d'avis
+      const totalTxt = $('[class*="reviewCount"]').first().text();
+      const total = parseInt(totalTxt.replace(/\D/g,""));
+      if (total > 0) maxOffset = Math.max(maxOffset, (Math.min(Math.ceil(total/10), MAX_PAGES)-1)*10);
+      if (maxOffset > 0) return Math.min(Math.ceil(maxOffset / 10) + 1, MAX_PAGES);
+    }
+
+    // ── Générique : cherche ?page=N ou ?p=N dans les liens ─
+    const $ = cheerio.load(html);
+    let pageMax = 1;
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href") || "";
+      const m = href.match(/[?&](?:page|p|pg)=(\d+)/i);
+      if (m) {
+        const n = parseInt(m[1]);
+        if (n > pageMax) pageMax = n;
+      }
+    });
+    return Math.min(pageMax, MAX_PAGES);
+
+  } catch { return 1; }
+}
+
+/** Construit l'URL de la page N selon le site. */
+function buildPageUrl(baseUrl: string, page: number, site: SiteKey, firstHtml: string): string | null {
+  const urlObj = new URL(baseUrl);
+
+  if (site === "trustpilot") {
+    urlObj.searchParams.set("page", String(page));
+    return urlObj.toString();
+  }
+
+  if (site === "amazon") {
+    urlObj.searchParams.set("pageNumber", String(page));
+    return urlObj.toString();
+  }
+
+  if (site === "yelp") {
+    const start = (page - 1) * 20;
+    urlObj.searchParams.set("start", String(start));
+    return urlObj.toString();
+  }
+
+  if (site === "booking") {
+    urlObj.searchParams.set("page", String(page));
+    return urlObj.toString();
+  }
+
+  if (site === "tripadvisor") {
+    const offset = (page - 1) * 10;
+    // Pattern : -Reviews-or10-Name.html
+    const base = baseUrl.split("?")[0];
+    const alreadyOr = base.match(/-or\d+-/);
+    if (alreadyOr) return base.replace(/-or\d+-/, `-or${offset}-`);
+    return base.replace(/(-Reviews)(-)/i, `$1-or${offset}$2`);
+  }
+
+  if (site === "pagesjaunes") {
+    urlObj.searchParams.set("page", String(page));
+    return urlObj.toString();
+  }
+
+  // Générique : on cherche si le site utilise ?page= ou ?p=
+  const base = baseUrl.split("?")[0];
+  const existingParam = baseUrl.match(/[?&](page|p|pg)=(\d+)/i)?.[1];
+  if (existingParam) {
+    urlObj.searchParams.set(existingParam, String(page));
+    return urlObj.toString();
+  }
+
+  // Tente de deviner le paramètre depuis les liens de la page 1
+  const $ = cheerio.load(firstHtml);
+  let guessedParam = "page";
+  $("a[href]").each((_, el) => {
+    const m = ($(el).attr("href") || "").match(/[?&](page|p|pg|offset)=(\d+)/i);
+    if (m) { guessedParam = m[1]; return false; }
+  });
+  urlObj.searchParams.set(guessedParam, String(page));
+  return urlObj.toString();
+}
+
+// ── Main scraper (avec pagination) ────────────────────────────
 
 async function scrapeOne(url: string): Promise<SourceResult> {
   const source = hostLabel(url);
-  const site = detectSite(url);
+  const site   = detectSite(url);
   const emptyResult = (error: string): SourceResult => ({
     url, reviews: [], error, counts: { total: 0, positive: 0, negative: 0, neutral: 0, averageScore: 0 },
   });
 
-  let html: string;
+  // ── Page 1 ────────────────────────────────────────────────
+  let firstHtml: string;
   try {
-    html = await fetchHtml(url);
+    firstHtml = await fetchHtml(url);
   } catch (err: unknown) {
     const msg = axios.isAxiosError(err) && err.response
       ? `Erreur HTTP ${err.response.status}`
@@ -637,45 +807,37 @@ async function scrapeOne(url: string): Promise<SourceResult> {
     return emptyResult(msg);
   }
 
-  // Load two cheerio instances:
-  // $full = avec tous les scripts (pour JSON-LD & __NEXT_DATA__)
-  // $clean = sans scripts/nav/footer (pour les parsers CSS)
-  const $full = cheerio.load(html);
-  const $clean = cheerio.load(html);
-  $clean("script, style, noscript, nav, footer, header, [aria-hidden='true'], .cookie-banner, #cookie-banner").remove();
+  const allItems: RawItem[] = extractItemsFromHtml(firstHtml, site);
 
-  let items: RawItem[] = [];
+  // ── Détection du nombre de pages ─────────────────────────
+  const totalPages = detectTotalPages(firstHtml, url, site);
 
-  // 1. JSON-LD — le plus fiable, fonctionne sur beaucoup de sites
-  items = extractJsonLd($full);
+  // ── Pages suivantes (batches parallèles) ─────────────────
+  if (totalPages > 1) {
+    const pageUrls: string[] = [];
+    for (let p = 2; p <= totalPages; p++) {
+      const pageUrl = buildPageUrl(url, p, site, firstHtml);
+      if (pageUrl) pageUrls.push(pageUrl);
+    }
 
-  // 2. __NEXT_DATA__ si JSON-LD insuffisant (Trustpilot notamment)
-  if (items.length < 2) {
-    items = extractNextData(html);
-  }
-
-  // 3. Parser spécialisé par site
-  if (items.length < 2) {
-    switch (site) {
-      case "trustpilot":    items = parseTrustpilot($clean); break;
-      case "tripadvisor":   items = parseTripAdvisor($clean); break;
-      case "amazon":        items = parseAmazon($clean); break;
-      case "booking":       items = parseBooking($clean); break;
-      case "yelp":          items = parseYelp($clean); break;
-      case "pagesjaunes":   items = parsePagesJaunes($clean); break;
-      case "appstore":      items = parseAppStore($clean); break;
-      case "googleplay":    items = parseGooglePlay($clean); break;
-      case "avisverifies":  items = parseAvisVerifies($clean); break;
-      case "software":      items = parseSoftwareReview($clean); break;
+    for (let i = 0; i < pageUrls.length; i += BATCH_SIZE) {
+      const batch = pageUrls.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(async (pUrl) => {
+          try {
+            const html = await fetchHtml(pUrl);
+            return extractItemsFromHtml(html, site);
+          } catch { return []; }
+        })
+      );
+      for (const r of results) {
+        if (r.status === "fulfilled") allItems.push(...r.value);
+      }
+      if (i + BATCH_SIZE < pageUrls.length) await sleep(PAGE_DELAY);
     }
   }
 
-  // 4. Fallback générique amélioré
-  if (items.length < 2) {
-    items = parseGeneric($clean);
-  }
-
-  items = dedup(items);
+  const items = dedup(allItems);
 
   if (items.length === 0) {
     return emptyResult(
@@ -703,9 +865,13 @@ async function scrapeOne(url: string): Promise<SourceResult> {
   return {
     url,
     reviews,
-    counts: { total: reviews.length, positive, negative, neutral, averageScore: Math.round(averageScore * 100) / 100 },
+    counts: {
+      total: reviews.length, positive, negative, neutral,
+      averageScore: Math.round(averageScore * 100) / 100,
+    },
   };
 }
+
 
 // ── POST handler ──────────────────────────────────────────────
 
