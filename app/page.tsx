@@ -263,7 +263,17 @@ export default function Home() {
     (sourceFilter === "all" || r.source === sourceFilter)
   ) ?? [];
 
-  const hasValidUrl = urls.some((u) => u.trim());
+  const hasValidInput = urls.some((u) => u.trim());
+
+  // Détecte si une entrée ressemble à une URL
+  function inputIsUrl(s: string): boolean {
+    const t = s.trim();
+    if (/^https?:\/\//i.test(t)) return true;
+    if (!t.includes(" ") && /\.[a-z]{2,}(\/|$)/i.test(t)) return true;
+    return false;
+  }
+
+  const hasCompanySearch = urls.some(u => u.trim() && !inputIsUrl(u));
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans">
@@ -287,12 +297,13 @@ export default function Home() {
 
         {/* Hero + form */}
         <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-6 space-y-5">
-          <div>
+        <div>
             <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-              Analysez les sentiments de n&apos;importe quelle page d&apos;avis
+              Analysez les avis de n&apos;importe quelle entreprise
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              Collez jusqu&apos;à 10 URLs — les avis sont extraits et classés automatiquement.
+              Entrez une <strong>URL de page d&apos;avis</strong> ou directement un <strong>nom d&apos;entreprise</strong>
+              {" "}— nous cherchons automatiquement sur Trustpilot, Pages Jaunes, Yelp et TripAdvisor.
             </p>
           </div>
 
@@ -301,13 +312,24 @@ export default function Home() {
               {urls.map((url, i) => (
                 <div key={i} className="flex gap-2 items-center">
                   <span className="text-xs text-slate-300 font-mono w-4 text-center select-none shrink-0">{i + 1}</span>
-                  <input
-                    type="url"
-                    value={url}
-                    onChange={(e) => updateUrl(i, e.target.value)}
-                    placeholder="https://example.com/avis"
-                    className="flex-1 h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-900 placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent focus:bg-white transition"
-                  />
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={url}
+                      onChange={(e) => updateUrl(i, e.target.value)}
+                      placeholder="Decathlon, SNCF… ou https://fr.trustpilot.com/review/…"
+                      className="w-full h-10 px-3 pr-24 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-900 placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent focus:bg-white transition"
+                    />
+                    {url.trim() && (
+                      <span className={`absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                        inputIsUrl(url)
+                          ? "bg-indigo-50 text-indigo-500 border border-indigo-100"
+                          : "bg-violet-50 text-violet-600 border border-violet-100"
+                      }`}>
+                        {inputIsUrl(url) ? "URL" : "🔍 Recherche"}
+                      </span>
+                    )}
+                  </div>
                   {urls.length > 1 && (
                     <button
                       type="button"
@@ -334,19 +356,28 @@ export default function Home() {
                   <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                     <path d="M6 1v10M1 6h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
                   </svg>
-                  Ajouter une URL
+                  Ajouter
                 </button>
+              )}
+              {hasCompanySearch && (
+                <span className="text-xs text-violet-500 flex items-center gap-1">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" className="opacity-70">
+                    <circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+                    <path d="M8 8l2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                  Recherche automatique sur Trustpilot, Pages Jaunes, Yelp, TripAdvisor
+                </span>
               )}
               <button
                 type="submit"
-                disabled={scrapeStatus === "loading" || !hasValidUrl}
+                disabled={scrapeStatus === "loading" || !hasValidInput}
                 className="ml-auto flex items-center gap-2 h-10 px-5 rounded-xl bg-gradient-to-r from-violet-500 to-indigo-500 text-white text-sm font-semibold shadow-sm hover:from-violet-600 hover:to-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
               >
                 {scrapeStatus === "loading" ? (
-                  <><Spinner size={3} /> Analyse en cours…</>
+                  <><Spinner size={3} /> {hasCompanySearch ? "Recherche en cours…" : "Analyse en cours…"}</>
                 ) : (
                   <>
-                    Analyser
+                    {hasCompanySearch ? "Rechercher" : "Analyser"}
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                       <path d="M1 7h12M8 2l5 5-5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
                     </svg>
