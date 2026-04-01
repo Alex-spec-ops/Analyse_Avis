@@ -29,20 +29,22 @@ async function summarizeGroup(
       {
         role: "system",
         content:
-          "Tu es un analyste d'avis clients. Tu identifies les points récurrents dans des avis et les résumes en bullets très courts.",
+          "Tu es un analyste d'avis clients senior. Ton rôle est de fournir des résumés factuels et précis basés UNIQUEMENT sur les avis fournis. Ne mélange jamais les sentiments.",
       },
       {
         role: "user",
-        content: `Voici ${texts.length} avis ${sentiment} sur une entreprise :
+        content: `Voici ${texts.length} avis catégorisés comme "${sentiment}" sur une entreprise.
+Votre mission : Identifiez UNIQUEMENT les points qui sont ${sentiment === "positifs" ? "REELLEMENT POSITIFS et appréciés" : "REELLEMENT NEGATIFS et critiqués"}.
 
+Avis à analyser :
 ${sample}
 
-Identifie les 4 à 5 points qui reviennent le plus souvent dans ces avis ${sentiment}.
-Réponds UNIQUEMENT avec les bullets, un par ligne, format strict :
-• [point en 5-10 mots max]
-• [point en 5-10 mots max]
-...
-Pas d'introduction, pas de conclusion, pas d'explication. Juste les bullets.`,
+Instructions de réponse :
+- Ne listez que les points qui confirment le sentiment "${sentiment}".
+- Si un avis contient un mélange, n'extrayez que la partie qui est ${sentiment}.
+- Répondez par 3 à 5 bullets max (1 par ligne).
+- Format strict : • [Point succinct en 5-10 mots]
+- PAS de texte avant ou après.`,
       },
     ],
   });

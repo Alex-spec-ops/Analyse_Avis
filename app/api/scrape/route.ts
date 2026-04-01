@@ -180,8 +180,8 @@ function hostLabel(url: string): string {
 }
 
 function classifySentiment(score: number): "positive" | "negative" | "neutral" {
-  if (score > 1) return "positive";
-  if (score < -1) return "negative";
+  if (score > 2) return "positive";
+  if (score < -2) return "negative";
   return "neutral";
 }
 

@@ -1,732 +1,861 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import type { ScrapeResult, Review, SourceResult } from "./api/scrape/route";
 import type { SentimentSummaries } from "./api/summarize/route";
 import type { ActionsResult, BusinessAction } from "./api/actions/route";
+import { ROIProjectionChart, ActionTimeline } from "./components/Charts";
 
-type ScrapeStatus = "idle" | "loading" | "success" | "error";
-type SummarizeStatus = "idle" | "loading" | "success" | "error";
-type ActionsStatus = "idle" | "loading" | "success" | "error";
+type Step = "search" | "results" | "actions";
+type AsyncStatus = "idle" | "loading" | "success" | "error";
 type SentimentKey = Review["sentiment"];
-type FilterKey = "all" | SentimentKey;
 
-const S = {
-  positive: {
-    label: "Positif",
-    plural: "Positifs",
-    light: "bg-emerald-50 border-emerald-200 text-emerald-700",
-    badge: "bg-emerald-100 text-emerald-700",
-    dot: "bg-emerald-500",
-    bar: "bg-emerald-400",
-    card: "border-l-emerald-400",
-    summary: "bg-emerald-50 border-emerald-200",
-    summaryTitle: "text-emerald-700",
-    summaryText: "text-emerald-900",
-    stat: "from-emerald-500 to-emerald-600",
-    icon: "✦",
-  },
-  negative: {
-    label: "Négatif",
-    plural: "Négatifs",
-    light: "bg-rose-50 border-rose-200 text-rose-700",
-    badge: "bg-rose-100 text-rose-700",
-    dot: "bg-rose-500",
-    bar: "bg-rose-400",
-    card: "border-l-rose-400",
-    summary: "bg-rose-50 border-rose-200",
-    summaryTitle: "text-rose-700",
-    summaryText: "text-rose-900",
-    stat: "from-rose-500 to-rose-600",
-    icon: "✦",
-  },
-  neutral: {
-    label: "Neutre",
-    plural: "Neutres",
-    light: "bg-slate-50 border-slate-200 text-slate-600",
-    badge: "bg-slate-100 text-slate-600",
-    dot: "bg-slate-400",
-    bar: "bg-slate-300",
-    card: "border-l-slate-300",
-    summary: "bg-slate-50 border-slate-200",
-    summaryTitle: "text-slate-600",
-    summaryText: "text-slate-800",
-    stat: "from-slate-400 to-slate-500",
-    icon: "✦",
-  },
+interface HistoryItem {
+  query: string;
+  timestamp: number;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Config
+───────────────────────────────────────────────────────────── */
+
+const PLATFORMS = [
+  { name: "Trustpilot", color: "#00b67a" },
+  { name: "Google", color: "#4285f4" },
+  { name: "TripAdvisor", color: "#34e0a1" },
+  { name: "Pages Jaunes", color: "#ffcc00" },
+  { name: "Yelp", color: "#d32323" },
+  { name: "Indeed", color: "#003a9b" },
+  { name: "Glassdoor", color: "#0caa41" },
+  { name: "Custplace", color: "#6c63ff" },
+];
+
+const PRIORITY_CFG = {
+  haute:   { label: "Urgent",     stepBg: "bg-rose-500",  stepText: "text-white",      border: "border-rose-100",   tag: "bg-rose-100 text-rose-600"   },
+  moyenne: { label: "Important",  stepBg: "bg-amber-400", stepText: "text-white",      border: "border-amber-100",  tag: "bg-amber-100 text-amber-600"  },
+  faible:  { label: "Utile",      stepBg: "bg-slate-300", stepText: "text-slate-700",  border: "border-slate-100",  tag: "bg-slate-100 text-slate-500"  },
 } as const;
 
-/* ── Small helpers ─────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   Small UI atoms
+───────────────────────────────────────────────────────────── */
 
-function Badge({ s }: { s: SentimentKey }) {
+function Spinner({ className = "w-4 h-4" }: { className?: string }) {
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${S[s].badge}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${S[s].dot}`} />
-      {S[s].label}
-    </span>
+    <span className={`${className} inline-block rounded-full border-2 border-current border-t-transparent animate-spin opacity-60`} />
   );
 }
-
-function Spinner({ size = 4 }: { size?: number }) {
-  return (
-    <span
-      style={{ width: size * 4, height: size * 4 }}
-      className="inline-block rounded-full border-2 border-slate-200 border-t-slate-500 animate-spin"
-    />
-  );
-}
-
-/* ── Stat cards ────────────────────────────────────────────── */
-
-function StatCard({ sentiment, count, total }: { sentiment: SentimentKey; count: number; total: number }) {
-  const pct = total > 0 ? Math.round((count / total) * 100) : 0;
-  const cfg = S[sentiment];
-  return (
-    <div className="relative overflow-hidden rounded-2xl bg-white border border-slate-100 shadow-sm flex flex-col gap-3 p-5">
-      <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${cfg.stat}`} />
-      <span className={`text-xs font-semibold uppercase tracking-widest ${cfg.summaryTitle}`}>
-        {cfg.plural}
-      </span>
-      <div className="flex items-end justify-between">
-        <span className="text-4xl font-bold text-slate-900 tabular-nums leading-none">{count}</span>
-        <span className={`text-2xl font-bold tabular-nums ${cfg.summaryTitle} opacity-70`}>{pct}%</span>
-      </div>
-      <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
-        <div
-          className={`h-full rounded-full bg-gradient-to-r ${cfg.stat} transition-all duration-1000`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-/* ── Stacked distribution bar ──────────────────────────────── */
-
-function DistributionBar({ positive, negative, neutral, total }: { positive: number; negative: number; neutral: number; total: number }) {
-  if (total === 0) return null;
-  const pct = (n: number) => (n / total) * 100;
-  return (
-    <div className="space-y-2">
-      <div className="flex h-3 rounded-full overflow-hidden gap-px">
-        {positive > 0 && (
-          <div
-            title={`Positifs : ${positive}`}
-            className="bg-emerald-400 transition-all duration-1000"
-            style={{ width: `${pct(positive)}%` }}
-          />
-        )}
-        {neutral > 0 && (
-          <div
-            title={`Neutres : ${neutral}`}
-            className="bg-slate-300 transition-all duration-1000"
-            style={{ width: `${pct(neutral)}%` }}
-          />
-        )}
-        {negative > 0 && (
-          <div
-            title={`Négatifs : ${negative}`}
-            className="bg-rose-400 transition-all duration-1000"
-            style={{ width: `${pct(negative)}%` }}
-          />
-        )}
-      </div>
-      <div className="flex gap-4 text-xs text-slate-400">
-        {(["positive", "negative", "neutral"] as const).map((k) => {
-          const counts: Record<string, number> = { positive, negative, neutral };
-          return (
-            <span key={k} className="flex items-center gap-1">
-              <span className={`w-2 h-2 rounded-sm ${S[k].dot}`} />
-              {S[k].plural} · {Math.round(pct(counts[k]))}%
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/* ── Source chip ───────────────────────────────────────────── */
-
-function SourceChip({ source }: { source: SourceResult }) {
-  const host = (() => { try { return new URL(source.url).hostname.replace(/^www\./, ""); } catch { return source.url; } })();
-  const hasError = !!source.error;
-  return (
-    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium transition-colors ${
-      hasError
-        ? "bg-rose-50 border-rose-200 text-rose-600"
-        : "bg-white border-slate-200 text-slate-600 hover:border-slate-300"
-    }`}>
-      <span className={`w-2 h-2 rounded-full shrink-0 ${hasError ? "bg-rose-400" : "bg-emerald-400"}`} />
-      <span className="truncate max-w-[160px]" title={source.url}>{host}</span>
-      <span className={`shrink-0 ${hasError ? "text-rose-400" : "text-slate-400"}`}>
-        {hasError ? "Erreur" : `${source.counts.total} avis`}
-      </span>
-    </div>
-  );
-}
-
-/* ── Skeleton loader ───────────────────────────────────────── */
 
 function Skeleton({ className }: { className?: string }) {
   return <div className={`animate-pulse rounded-lg bg-slate-100 ${className}`} />;
 }
 
-function ResultsSkeleton() {
+function BackButton({ onClick, label = "Retour" }: { onClick: () => void; label?: string }) {
   return (
-    <div className="space-y-6">
-      <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-4 flex items-center gap-3">
-        <Spinner size={4} />
-        <div>
-          <p className="text-sm font-medium text-slate-700">Récupération de tous les avis en cours…</p>
-          <p className="text-xs text-slate-400 mt-0.5">Détection du nombre de pages · Scraping multi-pages en parallèle</p>
-        </div>
+    <button onClick={onClick} className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <path d="M9 2L4 7l5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      {label}
+    </button>
+  );
+}
+
+function SentimentBadge({ s }: { s: SentimentKey }) {
+  const cfg = { positive: "bg-emerald-100 text-emerald-700", negative: "bg-rose-100 text-rose-700", neutral: "bg-slate-100 text-slate-600" }[s];
+  const dot = { positive: "bg-emerald-500", negative: "bg-rose-500", neutral: "bg-slate-400" }[s];
+  const label = { positive: "Positif", negative: "Négatif", neutral: "Neutre" }[s];
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${cfg}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
+      {label}
+    </span>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Stat card
+───────────────────────────────────────────────────────────── */
+
+function StatCard({ label, count, pct, gradient }: { label: string; count: number; pct: number; gradient: string }) {
+  return (
+    <div className="relative overflow-hidden rounded-2xl bg-white border border-slate-100 shadow-sm p-5 flex flex-col gap-2">
+      <div className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r ${gradient}`} />
+      <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">{label}</p>
+      <div className="flex items-end gap-2">
+        <span className="text-3xl font-black text-slate-900 tabular-nums leading-none">{count}</span>
+        <span className="text-lg font-bold text-slate-400 tabular-nums mb-0.5">{pct}%</span>
       </div>
-      <div className="flex gap-2">
-        <Skeleton className="h-7 w-28 rounded-full" />
-        <Skeleton className="h-7 w-32 rounded-full" />
-      </div>
-      <div className="grid grid-cols-3 gap-3">
-        <Skeleton className="h-28 rounded-2xl" />
-        <Skeleton className="h-28 rounded-2xl" />
-        <Skeleton className="h-28 rounded-2xl" />
-      </div>
-      <Skeleton className="h-32 rounded-2xl" />
-      <div className="space-y-3">
-        <Skeleton className="h-20 rounded-xl" />
-        <Skeleton className="h-20 rounded-xl" />
-        <Skeleton className="h-16 rounded-xl" />
+      <div className="h-1 rounded-full bg-slate-100 overflow-hidden">
+        <div className={`h-full rounded-full bg-gradient-to-r ${gradient} transition-all duration-1000`} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
 }
 
-/* ── Main page ─────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   Source chip
+───────────────────────────────────────────────────────────── */
+
+function SourceChip({ source }: { source: SourceResult }) {
+  const host = (() => { try { return new URL(source.url).hostname.replace(/^www\./, ""); } catch { return source.url; } })();
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-600">
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+      {host}
+      <span className="text-slate-400">{source.counts.total}</span>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Bullet list (summaries)
+───────────────────────────────────────────────────────────── */
+
+function BulletList({ items, dot }: { items: string[]; dot: string }) {
+  return (
+    <ul className="space-y-2">
+      {items.map((b, i) => (
+        <li key={i} className="flex items-start gap-2.5 text-sm text-slate-700">
+          <span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+          {b}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Review card
+───────────────────────────────────────────────────────────── */
+
+/* ─────────────────────────────────────────────────────────────
+   History Drawer
+───────────────────────────────────────────────────────────── */
+
+function HistoryDrawer({ items, onSelect, onClose, onDelete, onClear }: {
+  items: HistoryItem[];
+  onSelect: (q: string) => void;
+  onClose: () => void;
+  onDelete: (idx: number) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end">
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity" onClick={onClose} />
+      
+      {/* Panel */}
+      <div className="relative w-full max-w-xs bg-white h-full shadow-2xl flex flex-col animate-in slide-in-from-right duration-300">
+        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+          <h2 className="text-sm font-bold text-slate-800">Historique</h2>
+          <button onClick={onClose} className="p-2 -mr-2 text-slate-400 hover:text-slate-600 transition-colors">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {items.length === 0 ? (
+            <div className="text-center py-12 px-4 space-y-3">
+              <span className="text-3xl grayscale opacity-30">📂</span>
+              <p className="text-xs text-slate-400 italic">Aucune recherche récente.</p>
+            </div>
+          ) : (
+            items.map((item, i) => (
+              <div 
+                key={i} 
+                className="group flex items-center gap-2 p-3 rounded-xl border border-slate-100 bg-white hover:border-violet-200 hover:shadow-sm transition-all cursor-pointer"
+                onClick={() => onSelect(item.query)}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-bold text-slate-700 truncate">{item.query}</p>
+                  <p className="text-[10px] text-slate-400">
+                    {new Date(item.timestamp).toLocaleDateString("fr-FR", { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                  </p>
+                </div>
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onDelete(i); }}
+                  className="opacity-0 group-hover:opacity-100 p-2 rounded-lg text-slate-300 hover:text-rose-500 hover:bg-rose-50 transition-all"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {items.length > 0 && (
+          <div className="p-4 border-t border-slate-100">
+            <button 
+              onClick={onClear}
+              className="w-full py-2.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-500 hover:border-rose-200 hover:text-rose-600 hover:bg-rose-50 transition-all"
+            >
+              Vider l'historique
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReviewCard({ review }: { review: Review }) {
+  const border = { positive: "border-l-emerald-400", negative: "border-l-rose-400", neutral: "border-l-slate-300" }[review.sentiment];
+  return (
+    <div className={`rounded-xl border border-slate-100 bg-white shadow-sm border-l-4 ${border} px-4 py-3 space-y-1.5`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <SentimentBadge s={review.sentiment} />
+          <span className="text-xs text-slate-400">{review.source}</span>
+        </div>
+        {review.rating && (
+          <span className="text-xs text-amber-500 font-semibold">★ {review.rating}</span>
+        )}
+      </div>
+      <p className="text-sm text-slate-700 leading-relaxed">{review.text}</p>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   PAGE — SEARCH
+───────────────────────────────────────────────────────────── */
+
+function SearchPage({ onSearch, loading, error, onShowHistory, historyCount }: {
+  onSearch: (company: string) => void;
+  loading: boolean;
+  error: string;
+  onShowHistory: () => void;
+  historyCount: number;
+}) {
+  const [input, setInput] = useState("");
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (input.trim()) onSearch(input.trim());
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+
+      {/* Top bar */}
+      <header className="bg-white border-b border-slate-100">
+        <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-xs font-black">A</div>
+            <span className="font-bold text-slate-800 tracking-tight">AvisScope</span>
+          </div>
+          
+          <button 
+            onClick={onShowHistory}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-slate-500 hover:bg-slate-50 transition-colors"
+          >
+            <div className="relative">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+              {historyCount > 0 && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-violet-500 border-2 border-white rounded-full" />
+              )}
+            </div>
+            <span className="text-xs font-bold">Historique</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Hero */}
+      <div className="flex-1 flex flex-col items-center justify-center px-6 py-16">
+        <div className="w-full max-w-xl space-y-10">
+
+          {/* Title */}
+          <div className="text-center space-y-3">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-50 border border-violet-100 text-violet-600 text-xs font-semibold mb-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
+              Analyse de réputation en temps réel
+            </div>
+            <h1 className="text-4xl font-black text-slate-900 tracking-tight leading-tight">
+              Que dit-on de<br />votre entreprise ?
+            </h1>
+            <p className="text-slate-500 text-base">
+              Entrez un nom d&apos;entreprise — nous collectons et analysons tous les avis disponibles sur le web.
+            </p>
+          </div>
+
+          {/* Search form */}
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <div className="relative">
+              <svg className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" viewBox="0 0 16 16" fill="none">
+                <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <input
+                type="text"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                placeholder="Ex : Decathlon, Air France, SNCF…"
+                autoFocus
+                className="w-full h-14 pl-11 pr-4 rounded-2xl border-2 border-slate-200 bg-white text-slate-900 text-base placeholder:text-slate-300 focus:outline-none focus:border-violet-400 focus:bg-white transition shadow-sm"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={loading || !input.trim()}
+              className="w-full h-12 rounded-2xl bg-gradient-to-r from-violet-500 to-indigo-500 text-white font-bold text-base shadow-md hover:from-violet-600 hover:to-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+            >
+              {loading ? <><Spinner className="w-4 h-4" /> Recherche en cours…</> : "Analyser les avis"}
+            </button>
+          </form>
+
+          {error && (
+            <div className="flex items-start gap-2.5 rounded-xl bg-rose-50 border border-rose-200 px-4 py-3">
+              <svg className="w-4 h-4 text-rose-400 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 3.75a.75.75 0 011.5 0v3.5a.75.75 0 01-1.5 0v-3.5zm.75 7a.875.875 0 110-1.75.875.875 0 010 1.75z" />
+              </svg>
+              <p className="text-sm text-rose-700">{error}</p>
+            </div>
+          )}
+
+          {/* Platforms */}
+          <div className="space-y-3">
+            <p className="text-center text-xs font-semibold text-slate-400 uppercase tracking-widest">Sources analysées</p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {PLATFORMS.map(p => (
+                <span key={p.name} className="px-3 py-1.5 rounded-full bg-white border border-slate-200 text-xs font-medium text-slate-600 shadow-sm">
+                  {p.name}
+                </span>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   PAGE — RESULTS
+───────────────────────────────────────────────────────────── */
+
+function ResultsPage({ company, result, summaries, summarizeStatus, onGoToActions, onBack, filter, setFilter }: {
+  company: string;
+  result: ScrapeResult;
+  summaries: SentimentSummaries | null;
+  summarizeStatus: AsyncStatus;
+  onGoToActions: () => void;
+  onBack: () => void;
+  filter: "all" | SentimentKey;
+  setFilter: (f: "all" | SentimentKey) => void;
+}) {
+  const { aggregated, allReviews, sources } = result;
+  const pct = (n: number) => aggregated.total > 0 ? Math.round((n / aggregated.total) * 100) : 0;
+
+  const filteredReviews = allReviews.filter(r => filter === "all" || r.sentiment === filter);
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+
+      {/* Top bar */}
+      <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-100 shadow-sm">
+        <div className="max-w-4xl mx-auto px-6 h-14 flex items-center gap-4">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-xs font-black shrink-0">A</div>
+          <span className="font-bold text-slate-800 tracking-tight hidden sm:block">AvisScope</span>
+
+          {/* Breadcrumb */}
+          <div className="flex items-center gap-2 text-xs text-slate-400 ml-2">
+            <button onClick={onBack} className="hover:text-slate-600 transition-colors">Recherche</button>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 2l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            <span className="font-semibold text-slate-700 truncate max-w-[120px]">{company}</span>
+          </div>
+
+          <button
+            onClick={onGoToActions}
+            className="ml-auto flex items-center gap-2 h-9 px-4 rounded-xl bg-gradient-to-r from-violet-500 to-indigo-500 text-white text-xs font-bold shadow-sm hover:from-violet-600 hover:to-indigo-600 transition-all shrink-0"
+          >
+            Plan d&apos;action
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6h8M6 2l4 4-4 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <main className="max-w-4xl mx-auto px-6 py-8 space-y-8 w-full">
+
+        {/* Company + meta */}
+        <div className="space-y-3">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 tracking-tight">{company}</h1>
+            <p className="text-sm text-slate-400 mt-0.5">{aggregated.total} avis collectés sur {sources.filter(s => s.counts.total > 0).length} plateforme{sources.filter(s => s.counts.total > 0).length > 1 ? "s" : ""}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {sources.filter(s => s.counts.total > 0).map((s, i) => <SourceChip key={i} source={s} />)}
+          </div>
+        </div>
+
+        {/* Stat cards */}
+        <div className="grid grid-cols-3 gap-3">
+          <StatCard label="Positifs"  count={aggregated.positive} pct={pct(aggregated.positive)} gradient="from-emerald-400 to-emerald-500" />
+          <StatCard label="Négatifs"  count={aggregated.negative} pct={pct(aggregated.negative)} gradient="from-rose-400 to-rose-500" />
+          <StatCard label="Neutres"   count={aggregated.neutral}  pct={pct(aggregated.neutral)}  gradient="from-slate-300 to-slate-400" />
+        </div>
+
+        {/* Summaries */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+          {/* Positifs */}
+          <div className="rounded-2xl bg-white border border-emerald-100 shadow-sm overflow-hidden">
+            <div className="px-5 py-3 bg-emerald-50 border-b border-emerald-100 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span className="text-xs font-bold text-emerald-700 uppercase tracking-widest">Ce qu&apos;ils apprécient</span>
+            </div>
+            <div className="p-5">
+              {summarizeStatus === "loading" && (
+                <div className="space-y-2.5">
+                  {[1,2,3].map(n => <Skeleton key={n} className="h-3 w-full" />)}
+                </div>
+              )}
+              {summarizeStatus === "success" && summaries && summaries.positive.length > 0 && (
+                <BulletList items={summaries.positive} dot="bg-emerald-500" />
+              )}
+              {summarizeStatus === "success" && summaries && summaries.positive.length === 0 && (
+                <p className="text-xs text-slate-400 italic">Aucun point positif identifié.</p>
+              )}
+            </div>
+          </div>
+
+          {/* Négatifs */}
+          <div className="rounded-2xl bg-white border border-rose-100 shadow-sm overflow-hidden">
+            <div className="px-5 py-3 bg-rose-50 border-b border-rose-100 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-rose-500" />
+              <span className="text-xs font-bold text-rose-700 uppercase tracking-widest">Ce qu&apos;ils reprochent</span>
+            </div>
+            <div className="p-5">
+              {summarizeStatus === "loading" && (
+                <div className="space-y-2.5">
+                  {[1,2,3].map(n => <Skeleton key={n} className="h-3 w-full" />)}
+                </div>
+              )}
+              {summarizeStatus === "success" && summaries && summaries.negative.length > 0 && (
+                <BulletList items={summaries.negative} dot="bg-rose-500" />
+              )}
+              {summarizeStatus === "success" && summaries && summaries.negative.length === 0 && (
+                <p className="text-xs text-slate-400 italic">Aucun point négatif identifié.</p>
+              )}
+            </div>
+          </div>
+
+        </div>
+
+        {/* CTA */}
+        {aggregated.negative > 0 && (
+          <button
+            onClick={onGoToActions}
+            className="w-full h-14 rounded-2xl bg-gradient-to-r from-orange-500 to-rose-500 text-white font-bold text-base shadow-md hover:from-orange-600 hover:to-rose-600 transition-all flex items-center justify-center gap-3"
+          >
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M9 2v7M9 13v2" stroke="white" strokeWidth="2" strokeLinecap="round" />
+              <circle cx="9" cy="9" r="7" stroke="white" strokeWidth="2" />
+            </svg>
+            Voir le plan d&apos;action pour réduire les avis négatifs
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M7 2l5 5-5 5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
+        )}
+
+        {/* Divider */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 h-px bg-slate-100" />
+          <span className="text-xs text-slate-400 font-medium">Tous les avis collectés</span>
+          <div className="flex-1 h-px bg-slate-100" />
+        </div>
+
+        {/* Filter tabs */}
+        <div className="flex items-center gap-1 p-1 bg-white rounded-xl border border-slate-100 shadow-sm w-fit">
+          {(["all", "positive", "negative", "neutral"] as const).map(f => {
+            const label = f === "all" ? `Tous · ${aggregated.total}` :
+              f === "positive" ? `Positifs · ${aggregated.positive}` :
+              f === "negative" ? `Négatifs · ${aggregated.negative}` : `Neutres · ${aggregated.neutral}`;
+            return (
+              <button key={f} onClick={() => setFilter(f)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${filter === f ? "bg-slate-900 text-white shadow-sm" : "text-slate-400 hover:text-slate-700"}`}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Reviews */}
+        <div className="space-y-2.5 pb-12">
+          {filteredReviews.length === 0 ? (
+            <div className="text-center py-10 text-slate-400 text-sm border border-dashed border-slate-200 rounded-2xl">
+              Aucun avis dans cette catégorie.
+            </div>
+          ) : filteredReviews.map((r, i) => <ReviewCard key={i} review={r} />)}
+        </div>
+
+      </main>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   PAGE — ACTIONS
+───────────────────────────────────────────────────────────── */
+
+function ActionsPage({ company, result, actionsResult, actionsStatus, actionsError, onRetry, onBack }: {
+  company: string;
+  result: ScrapeResult;
+  actionsResult: ActionsResult | null;
+  actionsStatus: AsyncStatus;
+  actionsError: string;
+  onRetry: () => void;
+  onBack: () => void;
+}) {
+  const negativePct = result.aggregated.total > 0
+    ? Math.round((result.aggregated.negative / result.aggregated.total) * 100) : 0;
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+
+      {/* Top bar */}
+      <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-100 shadow-sm">
+        <div className="max-w-4xl mx-auto px-6 h-14 flex items-center gap-4">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-xs font-black shrink-0">A</div>
+          <span className="font-bold text-slate-800 tracking-tight hidden sm:block">AvisScope</span>
+
+          {/* Breadcrumb */}
+          <div className="flex items-center gap-2 text-xs text-slate-400 ml-2">
+            <button onClick={() => { onBack(); onBack(); }} className="hover:text-slate-600 transition-colors">Recherche</button>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 2l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            <button onClick={onBack} className="hover:text-slate-600 transition-colors truncate max-w-[100px]">{company}</button>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 2l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            <span className="font-semibold text-slate-700">Plan d&apos;action</span>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-4xl mx-auto px-6 py-8 space-y-8 w-full">
+
+        {/* Page title */}
+        <div className="space-y-1">
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight">Plan d&apos;action — {company}</h1>
+          <p className="text-sm text-slate-400">
+            Basé sur l&apos;analyse de {result.aggregated.negative} avis négatifs ({negativePct}% du total)
+          </p>
+        </div>
+
+        {/* Error */}
+        {actionsStatus === "error" && (
+          <div className="flex items-center justify-between rounded-xl bg-rose-50 border border-rose-200 px-4 py-3">
+            <p className="text-sm text-rose-700">{actionsError}</p>
+            <button onClick={onRetry} className="text-xs font-semibold text-rose-600 hover:text-rose-800 underline">Réessayer</button>
+          </div>
+        )}
+
+        {/* Loading */}
+        {actionsStatus === "loading" && (
+          <div className="space-y-5">
+            <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-6 flex items-center gap-4">
+              <Spinner className="w-5 h-5 text-orange-500" />
+              <div>
+                <p className="text-sm font-semibold text-slate-700">Analyse en cours…</p>
+                <p className="text-xs text-slate-400 mt-0.5">Identification des problèmes · Génération des actions · Calcul du ROI</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">{[1,2,3].map(n => <Skeleton key={n} className="h-24 rounded-2xl" />)}</div>
+            {[1,2,3,4].map(n => <Skeleton key={n} className="h-40 rounded-2xl" />)}
+          </div>
+        )}
+
+        {/* Success */}
+        {actionsStatus === "success" && actionsResult && (
+          <div className="space-y-6">
+
+            {/* Ce qui va changer */}
+            <div className="rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50 to-indigo-50 overflow-hidden shadow-sm">
+              <div className="px-5 py-4 border-b border-violet-100 bg-white/50">
+                <h2 className="text-sm font-bold text-slate-800">Ce qui va changer</h2>
+                <p className="text-xs text-slate-400 mt-0.5">Résultats projetés après application de toutes les actions</p>
+              </div>
+              <div className="p-5">
+                <ROIProjectionChart projection={actionsResult.projection} />
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="space-y-4">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">Ce que vous devez faire</h2>
+                <p className="text-xs text-slate-400 mt-0.5">Commencez par l&apos;étape 1 — chaque action est classée par urgence</p>
+              </div>
+
+              {actionsResult.actions.map((action: BusinessAction, i: number) => {
+                const P = PRIORITY_CFG[action.priority];
+                return (
+                  <div key={i} className={`rounded-2xl border ${P.border} bg-white shadow-sm overflow-hidden`}>
+                    <div className="flex">
+                      {/* Step number */}
+                      <div className={`${P.stepBg} flex items-start justify-center pt-6 px-5 shrink-0 min-w-[56px]`}>
+                        <span className={`text-2xl font-black ${P.stepText} tabular-nums leading-none`}>{i + 1}</span>
+                      </div>
+
+                      <div className="flex-1 p-5 space-y-4 min-w-0">
+                        {/* Top row */}
+                        <div className="flex items-start justify-between gap-3 flex-wrap">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-0.5">Problème identifié</p>
+                            <p className="text-sm font-semibold text-slate-700">{action.problem}</p>
+                          </div>
+                          <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full shrink-0 ${P.tag}`}>{P.label}</span>
+                        </div>
+
+                        {/* Action */}
+                        <div className="rounded-xl bg-slate-900 px-4 py-3">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1">Ce que vous devez faire</p>
+                          <p className="text-sm font-bold text-white leading-snug">{action.action}</p>
+                        </div>
+
+                        {/* Why */}
+                        {action.why && (
+                          <div className="flex gap-3 rounded-xl bg-amber-50 border border-amber-100 px-4 py-3">
+                            <span className="text-lg shrink-0">💡</span>
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-amber-600 mb-1">Pourquoi ça va marcher</p>
+                              <p className="text-xs text-slate-600 leading-relaxed">{action.why}</p>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Metrics */}
+                        <div className="flex gap-3 flex-wrap">
+                          <div className="flex items-center gap-2 rounded-xl bg-emerald-50 border border-emerald-100 px-3 py-2.5">
+                            <span className="text-lg">📉</span>
+                            <div>
+                              <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide">Résultat attendu</p>
+                              <p className="text-sm font-black text-emerald-700">−{action.roi}% d&apos;avis négatifs</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
+                            <span className="text-lg">⏱</span>
+                            <div>
+                              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Délai estimé</p>
+                              <p className="text-sm font-black text-slate-700">
+                                {action.weeks <= 4 ? "~1 mois" : action.weeks <= 8 ? "~2 mois" : action.weeks <= 12 ? "~3 mois" : `~${Math.round(action.weeks / 4)} mois`}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Timeline */}
+            <div className="rounded-2xl bg-white border border-slate-100 shadow-sm overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-100">
+                <h2 className="text-sm font-bold text-slate-800">Quand voir les résultats</h2>
+                <p className="text-xs text-slate-400 mt-0.5">Temps estimé avant que chaque action impacte vos avis</p>
+              </div>
+              <div className="p-5">
+                <ActionTimeline actions={actionsResult.actions} />
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        <div className="pb-12" />
+      </main>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ROOT — orchestration
+───────────────────────────────────────────────────────────── */
 
 export default function Home() {
-  const [urls, setUrls] = useState<string[]>([""]);
-  const [scrapeStatus, setScrapeStatus] = useState<ScrapeStatus>("idle");
-  const [result, setResult] = useState<ScrapeResult | null>(null);
-  const [scrapeError, setScrapeError] = useState("");
-  const [filter, setFilter] = useState<FilterKey>("all");
-  const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [step, setStep] = useState<Step>("search");
+  const [company, setCompany] = useState("");
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
 
-  const [summarizeStatus, setSummarizeStatus] = useState<SummarizeStatus>("idle");
-  const [summaries, setSummaries] = useState<SentimentSummaries | null>(null);
-  const [summarizeError, setSummarizeError] = useState("");
+  const [scrapeStatus, setScrapeStatus]   = useState<AsyncStatus>("idle");
+  const [result, setResult]               = useState<ScrapeResult | null>(null);
+  const [scrapeError, setScrapeError]     = useState("");
 
-  const [actionsStatus, setActionsStatus] = useState<ActionsStatus>("idle");
-  const [actionsResult, setActionsResult] = useState<ActionsResult | null>(null);
-  const [actionsError, setActionsError] = useState("");
+  const [summarizeStatus, setSummarizeStatus] = useState<AsyncStatus>("idle");
+  const [summaries, setSummaries]             = useState<SentimentSummaries | null>(null);
 
-  function updateUrl(i: number, val: string) {
-    setUrls((prev) => prev.map((u, idx) => (idx === i ? val : u)));
+  const [actionsStatus, setActionsStatus]   = useState<AsyncStatus>("idle");
+  const [actionsResult, setActionsResult]   = useState<ActionsResult | null>(null);
+  const [actionsError, setActionsError]     = useState("");
+
+  const [filter, setFilter] = useState<"all" | Review["sentiment"]>("all");
+
+  /* ── History Persistence ── */
+  useEffect(() => {
+    const saved = localStorage.getItem("avis_history");
+    if (saved) {
+      try { setHistory(JSON.parse(saved)); } catch { /* ignore */ }
+    }
+  }, []);
+
+  function addToHistory(name: string) {
+    setHistory(prev => {
+      const filtered = prev.filter(h => h.query.toLowerCase() !== name.toLowerCase());
+      const next = [{ query: name, timestamp: Date.now() }, ...filtered].slice(0, 20);
+      localStorage.setItem("avis_history", JSON.stringify(next));
+      return next;
+    });
   }
-  function addUrl() { if (urls.length < 10) setUrls((p) => [...p, ""]); }
-  function removeUrl(i: number) { setUrls((p) => p.filter((_, idx) => idx !== i)); }
 
-  async function handleScrape(e: React.FormEvent) {
-    e.preventDefault();
-    const validUrls = urls.map((u) => u.trim()).filter(Boolean);
-    if (!validUrls.length) return;
+  function deleteHistoryItem(idx: number) {
+    setHistory(prev => {
+      const next = prev.filter((_, i) => i !== idx);
+      localStorage.setItem("avis_history", JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function clearHistory() {
+    setHistory([]);
+    localStorage.removeItem("avis_history");
+  }
+
+  /* ── Scrape ── */
+  async function handleSearch(name: string) {
+    setCompany(name);
+    setShowHistory(false);
     setScrapeStatus("loading");
     setResult(null);
     setScrapeError("");
-    setFilter("all");
-    setSourceFilter("all");
     setSummaries(null);
     setSummarizeStatus("idle");
     setActionsResult(null);
     setActionsStatus("idle");
-    setActionsError("");
+    setFilter("all");
+
     try {
       const res = await fetch("/api/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls: validUrls }),
+        body: JSON.stringify({ urls: [name] }),
       });
       const data = await res.json();
       if (!res.ok) { setScrapeError(data.error ?? "Erreur."); setScrapeStatus("error"); }
-      else { setResult(data); setScrapeStatus("success"); }
+      else { 
+        setResult(data); 
+        setScrapeStatus("success"); 
+        setStep("results");
+        addToHistory(name);
+      }
     } catch { setScrapeError("Impossible de contacter le serveur."); setScrapeStatus("error"); }
   }
 
-  async function handleSummarize() {
-    if (!result) return;
+  /* ── Summarize (auto-triggered) ── */
+  const runSummarize = useCallback(async (r: ScrapeResult) => {
     setSummarizeStatus("loading");
-    setSummaries(null);
-    setSummarizeError("");
-    const reviews = result.allReviews;
     try {
       const res = await fetch("/api/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          positive: reviews.filter((r) => r.sentiment === "positive").map((r) => r.text),
-          negative: reviews.filter((r) => r.sentiment === "negative").map((r) => r.text),
+          positive: r.allReviews.filter(x => x.sentiment === "positive").map(x => x.text),
+          negative: r.allReviews.filter(x => x.sentiment === "negative").map(x => x.text),
         }),
       });
       const data = await res.json();
-      if (!res.ok) { setSummarizeError(data.error ?? "Erreur."); setSummarizeStatus("error"); }
-      else { setSummaries(data); setSummarizeStatus("success"); }
-    } catch { setSummarizeError("Impossible de contacter le serveur."); setSummarizeStatus("error"); }
-  }
+      if (res.ok) { setSummaries(data); setSummarizeStatus("success"); }
+      else setSummarizeStatus("error");
+    } catch { setSummarizeStatus("error"); }
+  }, []);
 
-  async function handleActions() {
-    if (!result) return;
+  /* ── Actions (auto-triggered when entering actions page) ── */
+  const runActions = useCallback(async (r: ScrapeResult, name: string) => {
     setActionsStatus("loading");
     setActionsResult(null);
     setActionsError("");
-    const negativeTexts = result.allReviews
-      .filter((r) => r.sentiment === "negative")
-      .map((r) => r.text);
-    const company = urls.find((u) => u.trim()) ?? "l'entreprise";
+    const negativePct = r.aggregated.total > 0
+      ? Math.round((r.aggregated.negative / r.aggregated.total) * 100) : 0;
     try {
       const res = await fetch("/api/actions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ negative: negativeTexts, company }),
+        body: JSON.stringify({
+          negative: r.allReviews.filter(x => x.sentiment === "negative").map(x => x.text),
+          positive: r.allReviews.filter(x => x.sentiment === "positive").map(x => x.text),
+          company: name,
+          negativePct,
+        }),
       });
       const data = await res.json();
-      if (!res.ok) { setActionsError(data.error ?? "Erreur."); setActionsStatus("error"); }
-      else { setActionsResult(data); setActionsStatus("success"); }
+      if (res.ok) { setActionsResult(data); setActionsStatus("success"); }
+      else { setActionsError(data.error ?? "Erreur."); setActionsStatus("error"); }
     } catch { setActionsError("Impossible de contacter le serveur."); setActionsStatus("error"); }
-  }
+  }, []);
 
-  const sourceNames = result ? [...new Set(result.allReviews.map((r) => r.source))] : [];
-  const filteredReviews = result?.allReviews.filter((r) =>
-    (filter === "all" || r.sentiment === filter) &&
-    (sourceFilter === "all" || r.source === sourceFilter)
-  ) ?? [];
+  /* Auto-trigger summarize when results arrive */
+  useEffect(() => {
+    if (result && summarizeStatus === "idle") runSummarize(result);
+  }, [result, summarizeStatus, runSummarize]);
 
-  const hasValidInput = urls.some((u) => u.trim());
+  /* Auto-trigger actions when entering actions page */
+  useEffect(() => {
+    if (step === "actions" && result && actionsStatus === "idle") runActions(result, company);
+  }, [step, result, company, actionsStatus, runActions]);
 
-  // Détecte si une entrée ressemble à une URL
-  function inputIsUrl(s: string): boolean {
-    const t = s.trim();
-    if (/^https?:\/\//i.test(t)) return true;
-    if (!t.includes(" ") && /\.[a-z]{2,}(\/|$)/i.test(t)) return true;
-    return false;
-  }
+  /* ── Navigation ── */
+  function goToActions() { setStep("actions"); }
+  function goToResults() { setStep("results"); }
+  function goToSearch()  { setStep("search"); }
 
-  const hasCompanySearch = urls.some(u => u.trim() && !inputIsUrl(u));
-
+  /* ── Render ── */
   return (
-    <div className="min-h-screen bg-slate-50 font-sans">
+    <>
+      {step === "search" && (
+        <SearchPage 
+          onSearch={handleSearch} 
+          loading={scrapeStatus === "loading"} 
+          error={scrapeError} 
+          onShowHistory={() => setShowHistory(true)}
+          historyCount={history.length}
+        />
+      )}
 
-      {/* Top bar */}
-      <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-slate-100">
-        <div className="max-w-3xl mx-auto px-4 h-14 flex items-center gap-3">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold select-none">
-            A
-          </div>
-          <span className="font-semibold text-slate-800 tracking-tight">Analyse d&apos;avis</span>
-          {scrapeStatus === "success" && result && (
-            <span className="ml-auto text-xs text-slate-400 tabular-nums">
-              {result.aggregated.total} avis · {result.sources.length} source{result.sources.length > 1 ? "s" : ""}
-            </span>
-          )}
-        </div>
-      </header>
+      {step === "results" && result && (
+        <ResultsPage
+          company={company}
+          result={result}
+          summaries={summaries}
+          summarizeStatus={summarizeStatus}
+          onGoToActions={goToActions}
+          onBack={goToSearch}
+          filter={filter}
+          setFilter={setFilter}
+        />
+      )}
 
-      <main className="max-w-3xl mx-auto px-4 py-10 space-y-8">
+      {step === "actions" && result && (
+        <ActionsPage
+          company={company}
+          result={result}
+          actionsResult={actionsResult}
+          actionsStatus={actionsStatus}
+          actionsError={actionsError}
+          onRetry={() => runActions(result, company)}
+          onBack={goToResults}
+        />
+      )}
 
-        {/* Hero + form */}
-        <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-6 space-y-5">
-        <div>
-            <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-              Analysez les avis de n&apos;importe quelle entreprise
-            </h1>
-            <p className="mt-1 text-sm text-slate-500">
-              Entrez un <strong>nom d&apos;entreprise</strong> — les avis réels sont récupérés automatiquement
-              sur Trustpilot, Pages Jaunes, Yelp, TripAdvisor, Custplace, Avis Vérifiés, Opineo, Indeed et Glassdoor.
-            </p>
-          </div>
-
-          <form onSubmit={handleScrape} className="space-y-3">
-            <div className="space-y-2">
-              {urls.map((url, i) => (
-                <div key={i} className="flex gap-2 items-center">
-                  <span className="text-xs text-slate-300 font-mono w-4 text-center select-none shrink-0">{i + 1}</span>
-                  <div className="relative flex-1">
-                    <input
-                      type="text"
-                      value={url}
-                      onChange={(e) => updateUrl(i, e.target.value)}
-                      placeholder="Decathlon, SNCF… ou https://fr.trustpilot.com/review/…"
-                      className="w-full h-10 px-3 pr-24 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-900 placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-transparent focus:bg-white transition"
-                    />
-                    {url.trim() && (
-                      <span className={`absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                        inputIsUrl(url)
-                          ? "bg-indigo-50 text-indigo-500 border border-indigo-100"
-                          : "bg-violet-50 text-violet-600 border border-violet-100"
-                      }`}>
-                        {inputIsUrl(url) ? "URL" : "🔍 Recherche"}
-                      </span>
-                    )}
-                  </div>
-                  {urls.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => removeUrl(i)}
-                      className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-300 hover:text-rose-400 hover:bg-rose-50 transition-colors shrink-0"
-                      aria-label="Supprimer"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                        <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-2 pt-1">
-              {urls.length < 10 && (
-                <button
-                  type="button"
-                  onClick={addUrl}
-                  className="flex items-center gap-1.5 h-9 px-3 rounded-xl border border-dashed border-slate-300 text-xs text-slate-400 hover:text-slate-600 hover:border-slate-400 transition-colors"
-                >
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                    <path d="M6 1v10M1 6h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-                  </svg>
-                  Ajouter
-                </button>
-              )}
-              {hasCompanySearch && (
-                <span className="text-xs text-violet-500 flex items-center gap-1">
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" className="opacity-70">
-                    <circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>
-                    <path d="M8 8l2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                  </svg>
-                  Recherche sur Trustpilot, Pages Jaunes, Yelp, TripAdvisor, Custplace, Opineo, Indeed…
-                </span>
-              )}
-              <button
-                type="submit"
-                disabled={scrapeStatus === "loading" || !hasValidInput}
-                className="ml-auto flex items-center gap-2 h-10 px-5 rounded-xl bg-gradient-to-r from-violet-500 to-indigo-500 text-white text-sm font-semibold shadow-sm hover:from-violet-600 hover:to-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-              >
-                {scrapeStatus === "loading" ? (
-                  <><Spinner size={3} /> {hasCompanySearch ? "Recherche en cours…" : "Analyse en cours…"}</>
-                ) : (
-                  <>
-                    {hasCompanySearch ? "Rechercher" : "Analyser"}
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                      <path d="M1 7h12M8 2l5 5-5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                  </>
-                )}
-              </button>
-            </div>
-          </form>
-
-          {scrapeStatus === "error" && (
-            <div className="flex items-start gap-2.5 rounded-xl bg-rose-50 border border-rose-200 px-4 py-3">
-              <svg className="w-4 h-4 text-rose-500 mt-0.5 shrink-0" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 3.75a.75.75 0 011.5 0v3.5a.75.75 0 01-1.5 0v-3.5zm.75 7a.875.875 0 110-1.75.875.875 0 010 1.75z"/>
-              </svg>
-              <p className="text-sm text-rose-700">{scrapeError}</p>
-            </div>
-          )}
-
-          {/* Sources — affichées dans la carte après la recherche */}
-          {scrapeStatus === "success" && result && (
-            <div>
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">Sources analysées</p>
-              <div className="flex flex-wrap gap-2">
-                {result.sources.filter((s) => !s.error).map((s, i) => <SourceChip key={i} source={s} />)}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Loading skeleton */}
-        {scrapeStatus === "loading" && <ResultsSkeleton />}
-
-        {/* Results */}
-        {scrapeStatus === "success" && result && (
-          <div className="space-y-5">
-
-            {/* Stat cards */}
-            <div className="grid grid-cols-3 gap-3">
-              {(["positive", "negative", "neutral"] as const).map((k) => (
-                <StatCard key={k} sentiment={k} count={result.aggregated[k]} total={result.aggregated.total} />
-              ))}
-            </div>
-
-            {/* Distribution */}
-            <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-5 space-y-4">
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-semibold text-slate-700">Distribution</span>
-                <span className="text-xs text-slate-400">
-                  Score moyen :{" "}
-                  <span className={`font-semibold ${result.aggregated.averageScore > 0 ? "text-emerald-600" : result.aggregated.averageScore < 0 ? "text-rose-600" : "text-slate-500"}`}>
-                    {result.aggregated.averageScore > 0 ? "+" : ""}{result.aggregated.averageScore}
-                  </span>
-                </span>
-              </div>
-              <DistributionBar {...result.aggregated} />
-            </div>
-
-            {/* AI Summary */}
-            <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-5 space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-5 h-5 rounded-md bg-gradient-to-br from-violet-400 to-indigo-500 flex items-center justify-center">
-                      <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="currentColor">
-                        <path d="M6 1l1.2 3.6H11L8.4 6.8l.9 3.2L6 8.4l-3.3 1.6.9-3.2L1 4.6h3.8z"/>
-                      </svg>
-                    </div>
-                    <span className="text-sm font-semibold text-slate-800">Résumé IA</span>
-                  </div>
-                  <p className="mt-0.5 text-xs text-slate-400 ml-7">Synthèse Llama par groupe de sentiment</p>
-                </div>
-                <button
-                  onClick={handleSummarize}
-                  disabled={summarizeStatus === "loading" || result.aggregated.total === 0}
-                  className="shrink-0 flex items-center gap-2 h-9 px-4 rounded-xl border border-violet-200 bg-violet-50 text-sm font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  {summarizeStatus === "loading" ? (
-                    <><Spinner size={3} /> Génération…</>
-                  ) : summarizeStatus === "success" ? (
-                    "Régénérer"
-                  ) : (
-                    "Générer"
-                  )}
-                </button>
-              </div>
-
-              {summarizeStatus === "error" && (
-                <p className="text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3 border border-rose-200">{summarizeError}</p>
-              )}
-
-              {summarizeStatus === "idle" && (
-                <p className="text-sm text-slate-400 text-center py-4 border border-dashed border-slate-200 rounded-xl">
-                  Cliquez sur &quot;Générer&quot; pour obtenir une synthèse par sentiment
-                </p>
-              )}
-
-              {summarizeStatus === "loading" && (
-                <div className="space-y-3">
-                  {(["positive", "negative"] as const).map((k) => (
-                    <div key={k} className={`rounded-xl border p-4 space-y-2 ${S[k].summary}`}>
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${S[k].dot}`} />
-                        <Skeleton className="h-3 w-16" />
-                      </div>
-                      <Skeleton className="h-3 w-full" />
-                      <Skeleton className="h-3 w-4/5" />
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {summarizeStatus === "success" && summaries && (
-                <div className="space-y-3">
-                  {(["positive", "negative"] as const).map((k) => {
-                    const bullets: string[] = summaries[k] ?? [];
-                    return (
-                      <div key={k} className={`rounded-xl border p-4 ${S[k].summary}`}>
-                        <div className="flex items-center gap-2 mb-3">
-                          <span className={`w-2 h-2 rounded-full shrink-0 ${S[k].dot}`} />
-                          <span className={`text-xs font-bold uppercase tracking-widest ${S[k].summaryTitle}`}>{S[k].plural}</span>
-                          <span className="text-xs text-slate-400 ml-1">· {result.aggregated[k]} avis</span>
-                        </div>
-                        {bullets.length === 0 ? (
-                          <p className="text-xs text-slate-400 italic">Aucun point saillant identifié.</p>
-                        ) : (
-                          <ul className="space-y-1.5">
-                            {bullets.map((b, i) => (
-                              <li key={i} className={`flex items-start gap-2 text-sm ${S[k].summaryText}`}>
-                                <span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${S[k].dot} opacity-70`} />
-                                {b}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Business Actions */}
-            {result.aggregated.negative > 0 && (
-              <div className="rounded-2xl bg-white border border-slate-100 shadow-sm p-5 space-y-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-5 h-5 rounded-md bg-gradient-to-br from-orange-400 to-rose-500 flex items-center justify-center">
-                        <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="currentColor">
-                          <path d="M6 1v6M6 9v2" stroke="white" strokeWidth="1.5" strokeLinecap="round" fill="none"/>
-                        </svg>
-                      </div>
-                      <span className="text-sm font-semibold text-slate-800">Actions business</span>
-                    </div>
-                    <p className="mt-0.5 text-xs text-slate-400 ml-7">
-                      Recommandations pour réduire les avis négatifs ({result.aggregated.negative})
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleActions}
-                    disabled={actionsStatus === "loading"}
-                    className="shrink-0 flex items-center gap-2 h-9 px-4 rounded-xl border border-orange-200 bg-orange-50 text-sm font-medium text-orange-700 hover:bg-orange-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {actionsStatus === "loading" ? (
-                      <><Spinner size={3} /> Analyse…</>
-                    ) : actionsStatus === "success" ? "Régénérer" : "Analyser"}
-                  </button>
-                </div>
-
-                {actionsStatus === "error" && (
-                  <p className="text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3 border border-rose-200">{actionsError}</p>
-                )}
-
-                {actionsStatus === "idle" && (
-                  <p className="text-sm text-slate-400 text-center py-4 border border-dashed border-slate-200 rounded-xl">
-                    Cliquez sur &quot;Analyser&quot; pour obtenir des actions concrètes basées sur les avis négatifs
-                  </p>
-                )}
-
-                {actionsStatus === "loading" && (
-                  <div className="space-y-2.5">
-                    {[1, 2, 3, 4].map((n) => (
-                      <div key={n} className="flex gap-3 p-3 rounded-xl border border-slate-100 bg-slate-50">
-                        <Skeleton className="w-16 h-5 rounded-full shrink-0" />
-                        <div className="flex-1 space-y-1.5">
-                          <Skeleton className="h-3 w-2/5" />
-                          <Skeleton className="h-3 w-4/5" />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {actionsStatus === "success" && actionsResult && (
-                  <div className="space-y-2.5">
-                    {actionsResult.actions.map((action: BusinessAction, i: number) => {
-                      const priorityCfg = {
-                        haute:   { label: "Priorité haute",   bg: "bg-rose-50",   text: "text-rose-700",   border: "border-rose-200",   dot: "bg-rose-500" },
-                        moyenne: { label: "Priorité moyenne", bg: "bg-amber-50",  text: "text-amber-700",  border: "border-amber-200",  dot: "bg-amber-500" },
-                        faible:  { label: "Priorité faible",  bg: "bg-slate-50",  text: "text-slate-600",  border: "border-slate-200",  dot: "bg-slate-400" },
-                      }[action.priority];
-                      return (
-                        <div key={i} className={`flex gap-3 p-4 rounded-xl border ${priorityCfg.border} bg-white`}>
-                          <div className="shrink-0 pt-0.5">
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${priorityCfg.bg} ${priorityCfg.text}`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${priorityCfg.dot}`} />
-                              {priorityCfg.label}
-                            </span>
-                          </div>
-                          <div className="flex flex-col gap-0.5 min-w-0">
-                            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide truncate">{action.problem}</p>
-                            <p className="text-sm text-slate-800 leading-snug">{action.action}</p>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Filter bar */}
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-1 p-1 bg-white rounded-xl border border-slate-100 shadow-sm">
-                {(["all", "positive", "negative", "neutral"] as const).map((f) => {
-                  const label = f === "all"
-                    ? `Tous · ${result.aggregated.total}`
-                    : `${S[f].plural} · ${result.aggregated[f]}`;
-                  const active = filter === f;
-                  return (
-                    <button
-                      key={f}
-                      onClick={() => setFilter(f)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                        active
-                          ? "bg-slate-900 text-white shadow-sm"
-                          : "text-slate-500 hover:text-slate-700 hover:bg-slate-50"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {sourceNames.length > 1 && (
-                <select
-                  value={sourceFilter}
-                  onChange={(e) => setSourceFilter(e.target.value)}
-                  className="ml-auto h-9 px-3 rounded-xl border border-slate-200 bg-white text-xs text-slate-600 shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-300"
-                >
-                  <option value="all">Toutes les sources</option>
-                  {sourceNames.map((s) => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-
-            {/* Review count */}
-            <p className="text-xs text-slate-400">
-              {filteredReviews.length} avis affiché{filteredReviews.length > 1 ? "s" : ""}
-            </p>
-
-            {/* Review cards */}
-            <div className="space-y-2.5">
-              {filteredReviews.length === 0 ? (
-                <div className="text-center py-10 text-slate-400 text-sm border border-dashed border-slate-200 rounded-2xl">
-                  Aucun avis dans cette catégorie.
-                </div>
-              ) : (
-                filteredReviews.map((review, i) => (
-                  <div
-                    key={i}
-                    className={`rounded-xl border border-slate-100 bg-white shadow-sm pl-4 pr-4 py-4 border-l-4 ${S[review.sentiment].card} flex flex-col gap-2`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <Badge s={review.sentiment} />
-                        <span className="text-xs text-slate-400">{review.source}</span>
-                      </div>
-                      <div className="flex items-center gap-3 text-xs text-slate-400">
-                        {review.rating && (
-                          <span className="flex items-center gap-1">
-                            <svg className="w-3 h-3 text-amber-400" viewBox="0 0 12 12" fill="currentColor">
-                              <path d="M6 1l1.2 3.6H11L8.4 6.8l.9 3.2L6 8.4l-3.3 1.6.9-3.2L1 4.6h3.8z"/>
-                            </svg>
-                            {review.rating}
-                          </span>
-                        )}
-                        <span className={`font-mono font-semibold ${review.score > 0 ? "text-emerald-500" : review.score < 0 ? "text-rose-500" : "text-slate-400"}`}>
-                          {review.score > 0 ? "+" : ""}{review.score}
-                        </span>
-                      </div>
-                    </div>
-                    <p className="text-sm text-slate-700 leading-relaxed">{review.text}</p>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Idle empty state */}
-        {scrapeStatus === "idle" && (
-          <div className="text-center py-16 space-y-3">
-            <div className="mx-auto w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-100 to-indigo-100 flex items-center justify-center text-2xl">
-              🔍
-            </div>
-            <p className="text-sm text-slate-400">Entrez un nom d&apos;entreprise pour commencer l&apos;analyse</p>
-          </div>
-        )}
-      </main>
-    </div>
+      {showHistory && (
+        <HistoryDrawer 
+          items={history} 
+          onClose={() => setShowHistory(false)} 
+          onSelect={handleSearch}
+          onDelete={deleteHistoryItem}
+          onClear={clearHistory}
+        />
+      )}
+    </>
   );
 }
